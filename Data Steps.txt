@@ -1,0 +1,10 @@
+Data Steps: 
+
+1. Pulled data from SSMS via SQL with a custom query. 
+2. Exported and saved data as a CSV 
+3. Uploaded data to Azure ML Container where the data was read in via Pandas in a Jupyter Notebook. 
+4. A data frame was created from the CSV where it was then cleaned/manipulated
+5. Parameters testing conducted on various factors that were proposed for statistical significance
+6. Data split into test/train/validate subsets
+6. Model comparison done to see which would function best for final (XGBoost, Random Forest, or LightGBM)
+7. Final model selected (LightGBM) and forecast data populated

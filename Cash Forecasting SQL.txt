@@ -1,0 +1,170 @@
+/*==============================================================================
+ Query Name   : Rev Cycle: Cash
+ Author       : Abbey Mercier
+ Created Date : 2026-03-24
+ Current As Of: 2026-03-24
+
+ About:
+ Query returns transaction level data for IP payments (cash) and 
+ credit adjustments (charity write-off) to utilize for 
+ finanical forecasting. 
+
+ Notes:
+ - Intended for analytical and reporting use.
+==============================================================================*/
+
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+IF OBJECT_ID('TempDB..#PatPop') IS NOT NULL DROP TABLE #PatPop
+IF OBJECT_ID('TempDB..#BillingInfo') IS NOT NULL DROP TABLE #BillingInfo
+IF OBJECT_ID('TempDB..#Charity') IS NOT NULL DROP TABLE #Charity
+IF OBJECT_ID('TempDB..#ComboBilling') IS NOT NULL DROP TABLE #ComboBilling
+IF OBJECT_ID('TempDB..#CharityKeys') IS NOT NULL DROP TABLE #CharityKeys
+IF OBJECT_ID('TempDB..#CharityDischarge') IS NOT NULL DROP TABLE #CharityDischarge
+
+--Pat Pop
+select distinct
+ef.EncounterKey
+,ef.PatientDurableKey
+,baf.AccountEpicId
+,ef.AdmissionDateKey
+,adm.MonthNumber as [Admission Month]
+,adm.DayOfMonth as [Admission Day]
+,adm.Year as [Admission Year]
+,ef.DischargeDateKey
+,dis.DateValue as [Discharge Date]
+,dis.MonthNumber as [Discharge Month]
+,dis.DayOfMonth as [Discharge Day]
+,dis.Year as [Discharge Year]
+,ef.AgeKey
+into #PatPop
+from Caboodle.EncounterFact ef
+inner join Caboodle.DepartmentDim dd on dd.DepartmentKey = ef.DepartmentKey
+inner join Caboodle.DateDim adm on adm.DateKey = ef.AdmissionDateKey
+inner join Caboodle.DateDim dis on dis.DateKey = ef.DischargeDateKey
+inner join Caboodle.BillingAccountEncounterMappingFact bmf on bmf.EncounterKey = ef.EncounterKey
+inner join Caboodle.BillingAccountFact baf on baf.BillingAccountKey = bmf.BillingAccountKey
+           and baf.BillingSystemType = 'Hospital Billing'
+where PatientClass = 'Inpatient'
+and ef.AdmissionDateKey >= '20190401'
+and dd.DepartmentEpicId IN ('40101000','40101001','40101002','40101003','40101004','40101005')
+and dis.DateValue IS NOT NULL
+--LocationEpicId = '40101'
+--ServiceAreaEpicId = '401'
+
+
+--Billing Info > outstanding amount + coverage
+select
+baf.BillingAccountKey
+,btf.HospitalBillingTransactionEpicId
+,baf.AccountEpicId
+,baf.BillingSystemType
+,btf.Amount
+,btf.PostDateKey
+,dd.DateValue as [Post Date]
+,dd.MonthNumber as [Post Date Month]
+,dd.DayOfMonth as [Post Date Day]
+,dd.Year as [Post Date Year]
+,cdc.BenefitPlanName
+,cdc.PayorFinancialClass --not bringing in the same as in Epic
+,cdc.PayorName
+,btf.TransactionType
+into #BillingInfo
+from Caboodle.BillingAccountFact baf
+inner join #PatPop pp on pp.EncounterKey = baf.PrimaryEncounterKey
+left outer join Caboodle.CoverageDim cdc on cdc.CoverageKey = baf.PrimaryCoverageKey
+inner join Caboodle.BillingTransactionFact btf on btf.BillingAccountKey = baf.BillingAccountKey
+inner join Caboodle.DateDim dd on dd.DateKey = btf.PostDateKey
+where baf.BillingSystemType = 'Hospital Billing'
+and btf.TransactionType = 'Payment'
+--and btf.PostDateKey >= '20240401'
+order by baf.AccountEpicId, btf.PostDateKey
+--if patient flags as charity in above, they are partial
+
+
+--Charity
+select 
+baf.BillingAccountKey
+,btf.HospitalBillingTransactionEpicId
+,baf.AccountEpicId
+,baf.BillingSystemType
+,btf.Amount
+,btf.PostDateKey
+,dd.DateValue as [Post Date]
+,dd.MonthNumber as [Post Date Month]
+,dd.DayOfMonth as [Post Date Day]
+,dd.Year as [Post Date Year]
+,cdc.BenefitPlanName
+,cdc.PayorFinancialClass --not bringing in the same as in Epic
+,cdc.PayorName
+,btf.TransactionType
+into #Charity
+from [Caboodle].BillingTransactionFact btf 
+inner join [Caboodle].BillingAccountFact baf on baf.BillingAccountKey = btf.BillingAccountKey
+left outer join Caboodle.CoverageDim cdc on cdc.CoverageKey = baf.PrimaryCoverageKey
+inner join Caboodle.DateDim dd on dd.DateKey = btf.PostDateKey
+where btf.BillingSystemType='Hospital'
+and btf.TransactionType in ('Debit Adjustment','Credit Adjustment')
+and right(btf.GeneralLedgerDebitAccount,9)='500120000'
+--if don't exist in above query but exist in this one, they are 100% write-off
+
+
+--Union Tables
+select *
+into #ComboBilling
+from #BillingInfo
+UNION
+select *
+from #Charity
+ 
+
+--Distinct Charity Keys
+select distinct
+c.BillingAccountKey
+into #CharityKeys
+from #Charity c
+
+
+--Charity + Discharge
+select 
+c.BillingAccountKey
+,baf.DischargeDateKey
+,dd.MonthNumber as [Charity Discharge Month]
+,dd.DayOfMonth as [Charity Discharge Day]
+,dd.Year as [Charity Discharge Year]
+into #CharityDischarge
+from #CharityKeys c
+inner join Caboodle.BillingAccountFact baf on baf.BillingAccountKey = c.BillingAccountKey
+inner join Caboodle.DateDim dd on dd.DateKey = baf.DischargeDateKey
+order by c.BillingAccountKey
+
+
+--Main Query
+select
+cb.BillingAccountKey
+,cb.HospitalBillingTransactionEpicId
+,cb.AccountEpicId
+,cb.BillingSystemType
+,cb.Amount
+,cb.PostDateKey
+,cb.[Post Date]
+,cb.[Post Date Month]
+,cb.[Post Date Day]
+,cb.[Post Date Year]
+,cb.BenefitPlanName
+,cb.PayorFinancialClass --not bringing in the same as in Epic
+,cb.PayorName
+,cb.TransactionType
+,case when cb.TransactionType = 'Payment' then 'Cash' 
+	  when cb.TransactionType = 'Credit Adjustment' then 'Charity Write-Off' end as [Transaction Type]
+,case when ck.BillingAccountKey is not null then 'Y' else 'N' end as [Charity]
+,pp.[Discharge Date]
+,pp.[Discharge Month]
+,pp.[Discharge Day]
+,pp.[Discharge Year]
+from 
+#ComboBilling cb
+left outer join #CharityKeys ck on ck.BillingAccountKey = cb.BillingAccountKey
+left outer join #PatPop pp on pp.AccountEpicId = cb.AccountEpicId
+where pp.[Discharge Date] IS NOT NULL

@@ -1,0 +1,2196 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# ###### Code executes all information necessary to read in the CSV file
+
+# In[44]:
+
+
+from azureml.core import Workspace
+
+ws = Workspace.from_config()
+print("Subscription ID:", ws.subscription_id)
+print("Resource Group:", ws.resource_group)
+print("Workspace Name:", ws.name)
+
+
+# ###### Code shows all file names located in the directory
+
+# ### *Import Libraries*
+
+# In[45]:
+
+
+from azureml.core import Workspace
+from azureml.fsspec import AzureMachineLearningFileSystem
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+
+# ### *DataFrame Creation*
+
+# In[46]:
+
+
+#read in the CSV file
+fs = AzureMachineLearningFileSystem(
+    "azureml://subscriptions/f7068e6f-981e-4f98-88ce-01812f4b007b/resourcegroups/shepherd_analytics/workspaces/aml-sa-prod/datastores/workspaceblobstore/paths/Cash_Forecasting/"
+)
+
+with fs.open("Cash_Forecasting/Cash_Forecasting_Data_Pulled.csv") as f:
+    df = pd.read_csv(f)
+
+df.head()
+
+
+
+# In[47]:
+
+
+files = fs.ls("Cash_Forecasting/")
+for f in files:
+    print(f)
+
+
+# ### *DataFrame Analysis*
+
+# Need to determine shape, column names, datatypes, non-null counts, NaN summary, statistical summary, and whether there are any duplicates
+
+# In[48]:
+
+
+###shape of DF
+print(df.shape)  # (rows, columns)
+print(df.columns.tolist())
+
+
+# In[49]:
+
+
+###datatypes + non-null counts
+df.info()
+
+
+# In[50]:
+
+
+#verifying there are no duplicate rows
+df.duplicated().sum()
+
+
+# ### *Parameters Testing*
+
+# 
+# Test the parameters to see which ones are affecting cash (statistical significance).
+# 
+#     1. Day of Week 
+#     2. Payor/Financial Class
+#     3. Payment Lag
+#     4. Charity Write-Offs
+# 
+# The end result will be a summary table of all tests above. 
+
+# In[51]:
+
+
+### Set up for runs###
+
+# Parse dates
+df['Post Date'] = pd.to_datetime(df['Post Date'])
+df['Discharge Date'] = pd.to_datetime(df['Discharge Date'])
+
+# Flip sign so cash received is positive
+df['Cash'] = df['Amount'] * -1
+
+# Add day of week
+df['DayOfWeek'] = df['Post Date'].dt.day_name()
+df['DayOfWeek_Num'] = df['Post Date'].dt.dayofweek  # 0=Mon, 4=Fri
+
+# Calculate lag
+df['Lag_Days'] = (df['Post Date'] - df['Discharge Date']).dt.days
+
+# Filter to real cash payments
+df_cash = df[(df['TransactionType'] == 'Payment') & (df['Cash'] > 0)].copy()
+
+print(f"Total cash payment rows: {len(df_cash):,}")
+print(df[['Post Date', 'Discharge Date', 'Cash', 'DayOfWeek', 'Lag_Days', 'PayorFinancialClass']].head(10))
+
+
+# In[52]:
+
+
+### 1. DAY OF WEEK ###
+dow_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+dow_summary = df_cash.groupby('DayOfWeek')['Cash'].agg(['sum', 'mean', 'count'])
+dow_summary = dow_summary.reindex(dow_order).dropna()
+
+print("=== Cash by Day of Week ===")
+print(dow_summary.round(2))
+
+groups_dow = [df_cash[df_cash['DayOfWeek'] == day]['Cash'].values 
+              for day in dow_order if day in df_cash['DayOfWeek'].values]
+f_dow, p_dow = stats.f_oneway(*groups_dow)
+print(f"\nANOVA F={f_dow:.4f}, p={p_dow:.4f}")
+print(f"{'Significant' if p_dow < 0.05 else 'Not Significant'}")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+dow_summary['sum'].plot(kind='bar', ax=axes[0], color='steelblue')
+axes[0].set_title('Total Cash by Day of Week')
+axes[0].set_ylabel('Total Cash')
+axes[0].tick_params(axis='x', rotation=45)
+
+dow_summary['mean'].plot(kind='bar', ax=axes[1], color='coral')
+axes[1].set_title('Avg Cash per Transaction by Day of Week')
+axes[1].set_ylabel('Avg Cash')
+axes[1].tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+# In[53]:
+
+
+### 2. PAYOR/FINANCIAL CLASS ###
+
+# --- By PayorFinancialClass ---
+payor_summary = df_cash.groupby('PayorFinancialClass')['Cash'].agg(['sum', 'mean', 'count'])
+payor_summary = payor_summary.sort_values('sum', ascending=False)
+
+print("=== Cash by Payor Financial Class ===")
+print(payor_summary.round(2))
+
+groups_payor = [df_cash[df_cash['PayorFinancialClass'] == p]['Cash'].values 
+                for p in df_cash['PayorFinancialClass'].unique()]
+f_payor, p_payor = stats.f_oneway(*groups_payor)
+print(f"\nANOVA F={f_payor:.4f}, p={p_payor:.4f}")
+print(f"{'Significant' if p_payor < 0.05 else 'Not Significant'}")
+
+# --- By PayorName (more granular) ---
+payorname_summary = df_cash.groupby('PayorName')['Cash'].agg(['sum', 'mean', 'count'])
+payorname_summary = payorname_summary.sort_values('sum', ascending=False)
+
+print("\n=== Cash by Payor Name (Top 15) ===")
+print(payorname_summary.head(15).round(2))
+
+groups_payorname = [df_cash[df_cash['PayorName'] == p]['Cash'].values 
+                    for p in df_cash['PayorName'].unique()]
+f_pn, p_pn = stats.f_oneway(*groups_payorname)
+print(f"\nANOVA F={f_pn:.4f}, p={p_pn:.4f}")
+print(f"{'Significant' if p_pn < 0.05 else 'Not Significant'}")
+
+# Plot financial class
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+payor_summary['sum'].plot(kind='bar', ax=axes[0], color='steelblue')
+axes[0].set_title('Total Cash by Financial Class')
+axes[0].set_ylabel('Total Cash')
+axes[0].tick_params(axis='x', rotation=45)
+
+payor_summary['mean'].plot(kind='bar', ax=axes[1], color='coral')
+axes[1].set_title('Avg Cash per Transaction by Financial Class')
+axes[1].set_ylabel('Avg Cash')
+axes[1].tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+# Plot top 10 payor names
+fig, ax = plt.subplots(figsize=(12, 5))
+payorname_summary['sum'].head(10).plot(kind='bar', ax=ax, color='mediumseagreen')
+ax.set_title('Total Cash by Payor Name (Top 10)')
+ax.set_ylabel('Total Cash')
+ax.tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+# In[54]:
+
+
+### 3. PAYMENT LAG ###
+
+df_lag = df_cash[(df_cash['Lag_Days'] >= 0) & (df_cash['Lag_Days'] <= 730)].copy()
+
+bins   = [0, 30, 60, 90, 120, 180, 270, 365, 730]
+labels = ['0-30d','31-60d','61-90d','91-120d','121-180d','181-270d','271-365d','366-730d']
+df_lag['Lag_Bucket'] = pd.cut(df_lag['Lag_Days'], bins=bins, labels=labels)
+
+lag_summary = df_lag.groupby('Lag_Bucket', observed=True)['Cash'].agg(['sum', 'mean', 'count'])
+print("=== Cash by Payment Lag ===")
+print(lag_summary.round(2))
+
+corr_lag, p_lag = stats.pearsonr(df_lag['Lag_Days'], df_lag['Cash'])
+print(f"\nPearson r={corr_lag:.4f}, p={p_lag:.4f}")
+print(f"{'Significant' if p_lag < 0.05 else 'Not Significant'}")
+
+# Also run ANOVA across lag buckets
+groups_lag = [df_lag[df_lag['Lag_Bucket'] == b]['Cash'].values for b in labels]
+groups_lag = [g for g in groups_lag if len(g) > 1]
+f_lag_anova, p_lag_anova = stats.f_oneway(*groups_lag)
+print(f"ANOVA across lag buckets: F={f_lag_anova:.4f}, p={p_lag_anova:.4f}")
+print(f"{'Significant' if p_lag_anova < 0.05 else 'Not Significant'}")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+lag_summary['count'].plot(kind='bar', ax=axes[0], color='steelblue')
+axes[0].set_title('Number of Payments by Lag Bucket')
+axes[0].set_ylabel('Count')
+axes[0].tick_params(axis='x', rotation=45)
+
+lag_summary['mean'].plot(kind='bar', ax=axes[1], color='mediumseagreen')
+axes[1].set_title('Avg Cash Amount by Lag Bucket')
+axes[1].set_ylabel('Avg Cash')
+axes[1].tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+# In[55]:
+
+
+### 4. CHARITY WRITE-OFFS ###
+
+# Daily cash
+daily_cash = df_cash.groupby('Post Date')['Cash'].sum().reset_index()
+daily_cash.columns = ['Post Date', 'Daily_Cash']
+
+# Daily write-offs
+df_wo = df[df['Transaction Type'] == 'Charity Write-Off'].copy()
+df_wo['Writeoff_Amount'] = df_wo['Amount'].abs()
+daily_wo = df_wo.groupby('Post Date')['Writeoff_Amount'].sum().reset_index()
+
+# Write-off count per day
+daily_wo_count = df_wo.groupby('Post Date').size().reset_index(name='Writeoff_Count')
+
+# Merge all
+daily_merged = daily_cash.merge(daily_wo, on='Post Date', how='left')
+daily_merged = daily_merged.merge(daily_wo_count, on='Post Date', how='left')
+daily_merged = daily_merged.fillna(0)
+
+# Correlation — write-off amount vs cash
+corr_wo, p_wo = stats.pearsonr(daily_merged['Writeoff_Amount'], daily_merged['Daily_Cash'])
+print("=== Charity Write-Offs vs Daily Cash ===")
+print(f"Write-off Amount  → Pearson r={corr_wo:.4f}, p={p_wo:.4f} {'Significant' if p_wo < 0.05 else 'Not Significant'}")
+
+# Correlation — write-off count vs cash
+corr_woc, p_woc = stats.pearsonr(daily_merged['Writeoff_Count'], daily_merged['Daily_Cash'])
+print(f"Write-off Count   → Pearson r={corr_woc:.4f}, p={p_woc:.4f} {'Significant' if p_woc < 0.05 else 'Not Significant'}")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].scatter(daily_merged['Writeoff_Amount'], daily_merged['Daily_Cash'], alpha=0.4, color='purple')
+m, b = np.polyfit(daily_merged['Writeoff_Amount'], daily_merged['Daily_Cash'], 1)
+axes[0].plot(daily_merged['Writeoff_Amount'], m * daily_merged['Writeoff_Amount'] + b, color='red', lw=2)
+axes[0].set_xlabel('Daily Write-Off Amount')
+axes[0].set_ylabel('Daily Cash Received')
+axes[0].set_title('Write-Off Amount vs Daily Cash')
+
+axes[1].scatter(daily_merged['Writeoff_Count'], daily_merged['Daily_Cash'], alpha=0.4, color='darkorange')
+m2, b2 = np.polyfit(daily_merged['Writeoff_Count'], daily_merged['Daily_Cash'], 1)
+axes[1].plot(daily_merged['Writeoff_Count'], m2 * daily_merged['Writeoff_Count'] + b2, color='red', lw=2)
+axes[1].set_xlabel('Daily Write-Off Count')
+axes[1].set_ylabel('Daily Cash Received')
+axes[1].set_title('Write-Off Count vs Daily Cash')
+plt.tight_layout()
+plt.show()
+
+
+# In[56]:
+
+
+### FULL SUMMARY TABLE OF ALL TESTS ###
+print("=" * 65)
+print("           FULL STATISTICAL SIGNIFICANCE SUMMARY")
+print("=" * 65)
+print(f"{'Factor':<35} {'Sig?':<8} {'Test':<10} {'Stat'}")
+print("-" * 65)
+
+results = [
+    ("Day of Week",                 p_dow,       "ANOVA",   f"F={f_dow:.2f}"),
+    ("Payor Financial Class",       p_payor,     "ANOVA",   f"F={f_payor:.2f}"),
+    ("Payor Name",                  p_pn,        "ANOVA",   f"F={f_pn:.2f}"),
+    ("Lag Days (continuous)",       p_lag,       "Pearson", f"r={corr_lag:.3f}"),
+    ("Lag Bucket (grouped)",        p_lag_anova, "ANOVA",   f"F={f_lag_anova:.2f}"),
+    ("Charity Write-Off Amount",    p_wo,        "Pearson", f"r={corr_wo:.3f}"),
+    ("Charity Write-Off Count",     p_woc,       "Pearson", f"r={corr_woc:.3f}"),
+]
+
+for name, p, test, stat in results:
+    sig = "YES" if p < 0.05 else "NO"
+    print(f"{name:<35} {sig:<8} {test:<10} {stat}, p={p:.4f}")
+
+print("=" * 65)
+print("\n Significant factors will be used as regressors in the forecast model.")
+
+
+# ##### Takeaways
+# 
+# Day of Week — Strong effect (F=14.65). Your Friday hypothesis is confirmed — we'll add this as a regressor.
+# 
+# Payor Financial Class — Strongest signal in the whole dataset (F=117.39). Different payers (Medicare, Commercial, Blue Cross etc.) pay very different amounts. Very important to include.
+# 
+# Payor Name — Also significant (F=29.56) but since Financial Class already captures this at a higher level, we'll use Financial Class to keep the model simpler.
+# 
+# Lag Days continuous — The raw number of days doesn't linearly predict cash amount, BUT...
+# 
+# Lag Bucket grouped — When you group lag into buckets (0-30d, 31-60d etc.), it IS significant (F=28.18). This means it's not a straight line relationship — certain lag windows produce more cash than others. We'll use buckets.
+# 
+# Charity Write-Off Amount — The dollar amount of write-offs alone doesn't correlate with daily cash.
+# 
+# Charity Write-Off Count — But the NUMBER of write-offs per day does matter (r=0.067). More write-off events on a given day weakly but significantly reduces cash.
+# 
+
+# ### *Model Build*
+
+# Going to utilize Prophet + XGBoost Hybrid -> trend/seasonality from Prophet then residuals from XGBoost
+
+# In[57]:
+
+
+# Sanity check before modeling
+print("Date range:", df['Post Date'].min(), "→", df['Post Date'].max())
+print("Total days:", (df['Post Date'].max() - df['Post Date'].min()).days)
+print("Total cash transactions:", len(df_cash))
+print(f"Total cash received: ${df_cash['Cash'].sum():,.2f}")
+print("\nPayor Financial Class mix:")
+print(df_cash.groupby('PayorFinancialClass')['Cash'].sum().sort_values(ascending=False))
+
+
+# In[58]:
+
+
+import sys
+get_ipython().system('{sys.executable} -m pip install prophet lightgbm xgboost scikit-learn --quiet')
+
+
+# ##### Data Prep
+
+# In[59]:
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+# ── Parse dates & flip sign ──────────────────────────────────────
+df['Post Date']      = pd.to_datetime(df['Post Date'])
+df['Discharge Date'] = pd.to_datetime(df['Discharge Date'])
+df['Cash']           = df['Amount'] * -1
+df['DayOfWeek']      = df['Post Date'].dt.day_name()
+df['Lag_Days']       = (df['Post Date'] - df['Discharge Date']).dt.days
+
+# ── Filter to real cash payments ─────────────────────────────────
+df_cash = df[(df['TransactionType'] == 'Payment') & (df['Cash'] > 0)].copy()
+
+# ── Daily cash received ──────────────────────────────────────────
+daily_cash = df_cash.groupby('Post Date')['Cash'].sum().reset_index()
+daily_cash.columns = ['ds', 'y']
+
+# ── Daily write-off count ────────────────────────────────────────
+df_wo          = df[df['Transaction Type'] == 'Charity Write-Off'].copy()
+daily_wo_count = df_wo.groupby('Post Date').size().reset_index(name='writeoff_count')
+daily_wo_count = daily_wo_count.rename(columns={'Post Date': 'ds'})  # ✅ fix
+
+# ── Daily payor mix (% of transactions per financial class) ──────
+payor_daily = df_cash.groupby(['Post Date', 'PayorFinancialClass']).size().reset_index(name='count')
+payor_total = df_cash.groupby('Post Date').size().reset_index(name='total')
+payor_daily = payor_daily.merge(payor_total, on='Post Date')
+payor_daily['pct'] = payor_daily['count'] / payor_daily['total']
+payor_pivot = payor_daily.pivot_table(index='Post Date', columns='PayorFinancialClass', values='pct', fill_value=0)
+payor_pivot.columns = [f'payor_{c.lower().replace(" ", "_").replace("/", "_")}' for c in payor_pivot.columns]
+payor_pivot = payor_pivot.reset_index().rename(columns={'Post Date': 'ds'})  # ✅ fix
+
+# ── Daily lag bucket ─────────────────────────────────────────────
+bins   = [0, 30, 60, 90, 120, 180, 270, 365, 730]
+labels = ['0_30','31_60','61_90','91_120','121_180','181_270','271_365','366_730']
+df_cash_lag = df_cash[(df_cash['Lag_Days'] >= 0) & (df_cash['Lag_Days'] <= 730)].copy()
+df_cash_lag['Lag_Bucket'] = pd.cut(df_cash_lag['Lag_Days'], bins=bins, labels=labels)
+lag_daily  = df_cash_lag.groupby(['Post Date', 'Lag_Bucket'], observed=True).size().reset_index(name='count')
+lag_total  = df_cash_lag.groupby('Post Date').size().reset_index(name='total')
+lag_daily  = lag_daily.merge(lag_total, on='Post Date')
+lag_daily['pct'] = lag_daily['count'] / lag_daily['total']
+lag_pivot  = lag_daily.pivot_table(index='Post Date', columns='Lag_Bucket', values='pct', fill_value=0)
+lag_pivot.columns = [f'lag_{c}' for c in lag_pivot.columns]
+lag_pivot  = lag_pivot.reset_index().rename(columns={'Post Date': 'ds'})  # ✅ fix
+
+# ── Fill full date range (no missing dates) ──────────────────────
+date_range = pd.date_range(daily_cash['ds'].min(), daily_cash['ds'].max(), freq='D')
+daily = daily_cash.set_index('ds').reindex(date_range, fill_value=0).reset_index()
+daily.columns = ['ds', 'y']
+
+# ── Merge all regressors ─────────────────────────────────────────
+daily = daily.merge(daily_wo_count, on='ds', how='left')
+daily = daily.merge(payor_pivot,    on='ds', how='left')
+daily = daily.merge(lag_pivot,      on='ds', how='left')
+daily = daily.fillna(0)
+
+# ── Date-based features ──────────────────────────────────────────
+daily['is_friday']  = (daily['ds'].dt.dayofweek == 4).astype(int)
+daily['is_weekend'] = (daily['ds'].dt.dayofweek >= 5).astype(int)
+daily['month']      = daily['ds'].dt.month
+daily['quarter']    = daily['ds'].dt.quarter
+
+print(f" Daily dataset ready: {daily.shape}")
+print(f"   Date range: {daily['ds'].min().date()} → {daily['ds'].max().date()}")
+print(f"   Total days: {len(daily)}")
+print(f"   Columns: {list(daily.columns)}")
+daily.head()
+
+
+# ##### Train/test split
+
+# In[60]:
+
+
+# Hold out last 180 days for testing
+cutoff = daily['ds'].max() - pd.Timedelta(days=180)
+train  = daily[daily['ds'] <= cutoff].copy()
+test   = daily[daily['ds'] >  cutoff].copy()
+
+print(f"Train: {train['ds'].min().date()} → {train['ds'].max().date()} ({len(train)} days)")
+print(f"Test:  {test['ds'].min().date()}  → {test['ds'].max().date()} ({len(test)} days)")
+
+
+# ##### Prophet Model
+
+# In[61]:
+
+
+from prophet import Prophet
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Identify regressor columns
+regressor_cols = [c for c in daily.columns if c.startswith(('payor_', 'lag_', 'writeoff', 'is_', 'month', 'quarter'))]
+
+# Build model
+prophet_model = Prophet(
+    yearly_seasonality  = True,
+    weekly_seasonality  = True,
+    daily_seasonality   = False,
+    changepoint_prior_scale    = 0.1,
+    seasonality_prior_scale    = 10,
+)
+
+# Add all regressors
+for col in regressor_cols:
+    prophet_model.add_regressor(col)
+
+prophet_model.fit(train[['ds', 'y'] + regressor_cols])
+
+# Predict on test set
+prophet_forecast = prophet_model.predict(test[['ds'] + regressor_cols])
+
+# Evaluate
+y_true = test['y'].values
+y_pred_prophet = prophet_forecast['yhat'].clip(lower=0).values
+
+mae_p  = mean_absolute_error(y_true, y_pred_prophet)
+rmse_p = np.sqrt(mean_squared_error(y_true, y_pred_prophet))
+# MAPE on non-zero days only
+mask   = y_true > 0
+mape_p = np.mean(np.abs((y_true[mask] - y_pred_prophet[mask]) / y_true[mask])) * 100
+
+print(f"Prophet Results:")
+print(f"   MAE:  ${mae_p:,.2f}")
+print(f"   RMSE: ${rmse_p:,.2f}")
+print(f"   MAPE: {mape_p:.1f}% (on non-zero days)")
+
+
+# ##### XGBoost Model
+
+# In[62]:
+
+
+from xgboost import XGBRegressor
+
+daily_xgb = daily.copy()
+for lag in [1, 2, 3, 7, 14, 30]:
+    daily_xgb[f'cash_lag_{lag}'] = daily_xgb['y'].shift(lag)
+daily_xgb = daily_xgb.dropna()
+
+regressor_cols   = [c for c in daily.columns if c.startswith(('payor_', 'lag_', 'writeoff', 'is_', 'month', 'quarter'))]
+lag_feature_cols = regressor_cols + [f'cash_lag_{l}' for l in [1, 2, 3, 7, 14, 30]]
+daily_xgb[lag_feature_cols] = daily_xgb[lag_feature_cols].astype(float)
+
+train_xgb = daily_xgb[daily_xgb['ds'] <= cutoff].copy()
+test_xgb  = daily_xgb[daily_xgb['ds'] >  cutoff].copy()
+
+# ── Carve validation set from TRAIN only (last 60 days of train) ──
+val_xgb   = train_xgb.tail(60)
+tr_xgb    = train_xgb.iloc[:-60]
+
+X_tr    = tr_xgb[lag_feature_cols].values
+y_tr    = tr_xgb['y'].values
+X_val   = val_xgb[lag_feature_cols].values
+y_val   = val_xgb['y'].values
+X_test  = test_xgb[lag_feature_cols].values
+y_test_xgb  = test_xgb['y'].values
+
+xgb_model = XGBRegressor(
+    n_estimators          = 500,
+    learning_rate         = 0.05,
+    max_depth             = 4,
+    subsample             = 0.8,
+    colsample_bytree      = 0.8,
+    random_state          = 42,
+    verbosity             = 0,
+    tree_method           = 'hist',
+    early_stopping_rounds = 50       # ── added ──
+)
+xgb_model.fit(
+    X_tr, y_tr,
+    eval_set  = [(X_val, y_val)],    # ── validation only, test never seen ──
+    verbose   = False
+)
+
+y_pred_xgb = xgb_model.predict(X_test).clip(min=0)
+
+mae_x  = mean_absolute_error(y_test_xgb, y_pred_xgb)
+rmse_x = np.sqrt(mean_squared_error(y_test_xgb, y_pred_xgb))
+mask_x = y_test_xgb > 0
+mape_x = np.mean(np.abs((y_test_xgb[mask_x] - y_pred_xgb[mask_x]) / y_test_xgb[mask_x])) * 100
+print(f"XGBoost Results:")
+print(f"   Best iteration: {xgb_model.best_iteration}")
+print(f"   MAE:  ${mae_x:,.2f}")
+print(f"   RMSE: ${rmse_x:,.2f}")
+print(f"   MAPE: {mape_x:.1f}% (on non-zero days)")
+
+
+# ##### LightGBM Model
+
+# In[63]:
+
+
+import lightgbm as lgb
+from lightgbm import LGBMRegressor
+
+daily_lgb = daily.copy()
+for lag in [1, 2, 3, 7, 14, 30]:
+    daily_lgb[f'cash_lag_{lag}'] = daily_lgb['y'].shift(lag)
+daily_lgb = daily_lgb.dropna()
+
+daily_lgb[lag_feature_cols] = daily_lgb[lag_feature_cols].astype(float)
+
+train_lgb = daily_lgb[daily_lgb['ds'] <= cutoff].copy()
+test_lgb  = daily_lgb[daily_lgb['ds'] >  cutoff].copy()
+
+# ── Carve validation set from TRAIN only (last 60 days of train) ──
+val_lgb   = train_lgb.tail(60)
+tr_lgb    = train_lgb.iloc[:-60]
+
+X_tr    = tr_lgb[lag_feature_cols].values
+y_tr    = tr_lgb['y'].values
+X_val   = val_lgb[lag_feature_cols].values
+y_val   = val_lgb['y'].values
+X_test  = test_lgb[lag_feature_cols].values
+y_test_lgb  = test_lgb['y'].values
+
+lgb_model = LGBMRegressor(
+    n_estimators      = 500,
+    learning_rate     = 0.05,
+    max_depth         = 4,
+    subsample         = 0.8,
+    colsample_bytree  = 0.8,
+    min_child_samples = 5,
+    random_state      = 42,
+    verbose           = -1
+)
+lgb_model.fit(
+    X_tr, y_tr,
+    eval_set  = [(X_val, y_val)],    # ── validation only, test never seen ──
+    callbacks = [lgb.early_stopping(50, verbose=False),
+                 lgb.log_evaluation(period=-1)]
+)
+
+y_pred_lgb = lgb_model.predict(X_test).clip(min=0)
+
+mae_l  = mean_absolute_error(y_test_lgb, y_pred_lgb)
+rmse_l = np.sqrt(mean_squared_error(y_test_lgb, y_pred_lgb))
+mask_l = y_test_lgb > 0
+mape_l = np.mean(np.abs((y_test_lgb[mask_l] - y_pred_lgb[mask_l]) / y_test_lgb[mask_l])) * 100
+print(f"LightGBM Results:")
+print(f"   Best iteration: {lgb_model.best_iteration_}")
+print(f"   MAE:  ${mae_l:,.2f}")
+print(f"   RMSE: ${rmse_l:,.2f}")
+print(f"   MAPE: {mape_l:.1f}% (on non-zero days)")
+
+
+# ##### Compare Baseline Models (Prophet, XGBoost, LightGBM)
+
+# In[64]:
+
+
+pythonfig, axes = plt.subplots(3, 1, figsize=(16, 15))
+
+# ── Prophet plot ──────────────────────────────────────────────────
+axes[0].plot(test['ds'], y_true,         label='Actual',           color='black',     linewidth=1.5)
+axes[0].plot(test['ds'], y_pred_prophet, label='Prophet Forecast', color='steelblue', linewidth=1.5, linestyle='--')
+axes[0].fill_between(test['ds'],
+                     prophet_forecast['yhat_lower'].clip(0),
+                     prophet_forecast['yhat_upper'],
+                     alpha=0.2, color='steelblue', label='Confidence Interval')
+axes[0].set_title(f'Prophet  |  MAE: ${mae_p:,.0f}  |  MAPE: {mape_p:.1f}%')
+axes[0].set_ylabel('Cash Received ($)')
+axes[0].legend()
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+# ── XGBoost plot ──────────────────────────────────────────────────
+axes[1].plot(test_xgb['ds'], y_test_xgb,     label='Actual',           color='black',     linewidth=1.5)
+axes[1].plot(test_xgb['ds'], y_pred_xgb, label='XGBoost Forecast', color='coral',     linewidth=1.5, linestyle='--')
+axes[1].set_title(f'XGBoost  |  MAE: ${mae_x:,.0f}  |  MAPE: {mape_x:.1f}%')
+axes[1].set_ylabel('Cash Received ($)')
+axes[1].legend()
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+# ── LightGBM plot ─────────────────────────────────────────────────
+axes[2].plot(test_lgb['ds'], y_test_lgb,     label='Actual',            color='black',       linewidth=1.5)
+axes[2].plot(test_lgb['ds'], y_pred_lgb, label='LightGBM Forecast', color='mediumseagreen', linewidth=1.5, linestyle='--')
+axes[2].set_title(f'LightGBM  |  MAE: ${mae_l:,.0f}  |  MAPE: {mape_l:.1f}%')
+axes[2].set_ylabel('Cash Received ($)')
+axes[2].legend()
+axes[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+plt.suptitle('Cash Forecast Model Comparison', fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+
+# In[65]:
+
+
+print("\n=== Model Comparison Summary ===")
+print(f"{'Model':<12} {'MAE':>12} {'RMSE':>12} {'MAPE':>10}")
+print("-" * 48)
+print(f"{'Prophet':<12} ${mae_p:>11,.0f} ${rmse_p:>11,.0f} {mape_p:>9.1f}%")
+print(f"{'XGBoost':<12} ${mae_x:>11,.0f} ${rmse_x:>11,.0f} {mape_x:>9.1f}%")
+print(f"{'LightGBM':<12} ${mae_l:>11,.0f} ${rmse_l:>11,.0f} {mape_l:>9.1f}%")
+
+
+# #### Prophet Features
+
+# In[66]:
+
+
+prophet_importance  = prophet_model.params['beta'].mean(axis=0)
+regressor_names     = list(prophet_model.extra_regressors.keys())
+
+importance_prophet = pd.Series(
+    abs(prophet_importance[:len(regressor_names)]),
+    index=regressor_names
+).sort_values(ascending=False).head(15)
+
+plt.figure(figsize=(10, 6))
+importance_prophet.plot(kind='bar', color='mediumpurple')
+plt.title('Prophet — Top 15 Most Important Regressors')
+plt.ylabel('Absolute Coefficient')
+plt.tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+print("\nTop 15 Features:")
+print(importance_prophet.round(4))
+
+
+# #### XGBoost Features
+
+# In[67]:
+
+
+regressor_cols_base   = [c for c in daily.columns if c.startswith(('payor_', 'lag_', 'writeoff', 'is_', 'month', 'quarter'))]
+lag_feature_cols_base = regressor_cols_base + [f'cash_lag_{l}' for l in [1, 2, 3, 7, 14, 30]]
+
+print(f"Baseline features: {len(lag_feature_cols_base)}")
+print(f"Final features:    {len(lag_feature_cols)}")
+
+# ── XGBoost baseline feature importance ──────────────────────────
+importance_xgb_base = pd.Series(xgb_model.feature_importances_, index=lag_feature_cols_base)
+importance_xgb_base = importance_xgb_base.sort_values(ascending=False).head(15)
+
+plt.figure(figsize=(10, 6))
+importance_xgb_base.plot(kind='bar', color='steelblue')
+plt.title('XGBoost Baseline — Top 15 Most Important Features')
+plt.ylabel('Importance Score')
+plt.tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+print("\nTop 15 Features:")
+print(importance_xgb_base.round(4))
+
+
+# #### LightGBM Features
+
+# In[68]:
+
+
+importance = pd.Series(lgb_model.feature_importances_, index=lag_feature_cols)
+importance = importance.sort_values(ascending=False).head(15)
+
+plt.figure(figsize=(10, 6))
+importance.plot(kind='bar', color='mediumseagreen')
+plt.title('LightGBM — Top 15 Most Important Features')
+plt.ylabel('Importance Score')
+plt.tick_params(axis='x', rotation=45)
+plt.tight_layout()
+plt.show()
+
+print("\nTop 15 Features:")
+print(importance.round(4))
+
+
+# ##### Baseline Model Comparison Summary
+
+# In[69]:
+
+
+print("=" * 65)
+print("           MODEL COMPARISON SUMMARY")
+print("=" * 65)
+print(f"{'Metric':<15} {'Prophet':>15} {'XGBoost':>15} {'LightGBM':>15}")
+print("-" * 65)
+print(f"{'MAE':<15} ${mae_p:>14,.2f} ${mae_x:>14,.2f} ${mae_l:>14,.2f}")
+print(f"{'RMSE':<15} ${rmse_p:>14,.2f} ${rmse_x:>14,.2f} ${rmse_l:>14,.2f}")
+print(f"{'MAPE':<15} {mape_p:>14.1f}% {mape_x:>14.1f}% {mape_l:>14.1f}%")
+print("=" * 65)
+
+scores = {'Prophet': mae_p, 'XGBoost': mae_x, 'LightGBM': mae_l}
+winner = min(scores, key=scores.get)
+print(f"\n Winner by MAE: {winner}")
+print("\nNext steps:")
+print("  → If Prophet wins:   use for explainability + stakeholder reporting")
+print("  → If XGBoost wins:   use for accuracy + ensemble with Prophet")
+print("  → If LightGBM wins:  use as primary model — fastest + most accurate")
+print("  → Either way: we'll build daily/weekly/monthly forecast outputs")
+
+
+# Although XGBoost wins, the MAPE result is extremely high and higher than LightGBM - signals we need to address something in our underlying data set.
+# The problem - too many zero days! MAPE explodes when actual values are near zero because dividing by a small number. Model also has a lot of noise...Let's fix these issues in the next cells. 
+
+# ##### Filter to business days only
+
+# In[70]:
+
+
+print("=== Zero Day Analysis ===")
+print(f"Total days in dataset:        {len(daily)}")
+print(f"Days with $0 cash:            {(daily['y'] == 0).sum()}")
+print(f"Days with >$0 cash:           {(daily['y'] > 0).sum()}")
+print(f"% zero days:                  {(daily['y'] == 0).mean()*100:.1f}%")
+print(f"\nOn non-zero days:")
+print(f"  Mean daily cash:            ${daily[daily['y']>0]['y'].mean():,.2f}")
+print(f"  Median daily cash:          ${daily[daily['y']>0]['y'].median():,.2f}")
+print(f"  Min:                        ${daily[daily['y']>0]['y'].min():,.2f}")
+print(f"  Max:                        ${daily[daily['y']>0]['y'].max():,.2f}")
+
+# Plot distribution of non-zero days
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+daily[daily['y'] > 0]['y'].hist(bins=50, color='steelblue')
+plt.title('Distribution of Daily Cash (non-zero days)')
+plt.xlabel('Cash Received ($)')
+plt.ylabel('Frequency')
+
+plt.subplot(1, 2, 2)
+daily['y'].plot(color='steelblue', linewidth=0.8)
+plt.title('Daily Cash Over Time')
+plt.ylabel('Cash ($)')
+plt.tight_layout()
+plt.show()
+
+
+# While the MAPE has reduced from 4284% to 566%, it is still too high. Suspect the large outlier payments are dominating the error. Let's cap the outliers to reduce error. 
+
+# In[71]:
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+
+# ── Parse dates & flip sign ───────────────────────────────────────
+df['Post Date']      = pd.to_datetime(df['Post Date'])
+df['Discharge Date'] = pd.to_datetime(df['Discharge Date'])
+df['Cash']           = df['Amount'] * -1
+df['DayOfWeek']      = df['Post Date'].dt.day_name()
+df['Lag_Days']       = (df['Post Date'] - df['Discharge Date']).dt.days
+
+# ── Filter to real cash payments ──────────────────────────────────
+df_cash = df[(df['TransactionType'] == 'Payment') & (df['Cash'] > 0)].copy()
+
+# ── Thresholds ────────────────────────────────────────────────────
+p95 = df_cash['Cash'].quantile(0.95)
+p99 = df_cash['Cash'].quantile(0.99)
+print(f"Large payment threshold (95th pct): ${p95:,.2f}")
+print(f"Mega payment threshold  (99th pct): ${p99:,.2f}")
+
+# ── Daily cash ────────────────────────────────────────────────────
+daily_cash = df_cash.groupby('Post Date')['Cash'].sum().reset_index()
+daily_cash.columns = ['ds', 'y']
+
+# ── Large & mega payment counts ───────────────────────────────────
+daily_large_count = df_cash[df_cash['Cash'] >= p95].groupby('Post Date').size().reset_index(name='large_pmt_count')
+daily_large_count = daily_large_count.rename(columns={'Post Date': 'ds'})
+
+daily_mega_count = df_cash[df_cash['Cash'] >= p99].groupby('Post Date').size().reset_index(name='mega_pmt_count')
+daily_mega_count = daily_mega_count.rename(columns={'Post Date': 'ds'})
+
+# ── Write-off count ───────────────────────────────────────────────
+df_wo          = df[df['Transaction Type'] == 'Charity Write-Off'].copy()
+daily_wo_count = df_wo.groupby('Post Date').size().reset_index(name='writeoff_count')
+daily_wo_count = daily_wo_count.rename(columns={'Post Date': 'ds'})
+
+# ── Payor mix ─────────────────────────────────────────────────────
+payor_daily = df_cash.groupby(['Post Date', 'PayorFinancialClass']).size().reset_index(name='count')
+payor_total = df_cash.groupby('Post Date').size().reset_index(name='total')
+payor_daily = payor_daily.merge(payor_total, on='Post Date')
+payor_daily['pct'] = payor_daily['count'] / payor_daily['total']
+payor_pivot = payor_daily.pivot_table(index='Post Date', columns='PayorFinancialClass', values='pct', fill_value=0)
+payor_pivot.columns = [f'payor_{c.lower().replace(" ", "_").replace("/", "_")}' for c in payor_pivot.columns]
+payor_pivot = payor_pivot.reset_index().rename(columns={'Post Date': 'ds'})
+
+# ── Lag bucket mix ────────────────────────────────────────────────
+bins   = [0, 30, 60, 90, 120, 180, 270, 365, 730]
+labels = ['0_30','31_60','61_90','91_120','121_180','181_270','271_365','366_730']
+df_cash_lag = df_cash[(df_cash['Lag_Days'] >= 0) & (df_cash['Lag_Days'] <= 730)].copy()
+df_cash_lag['Lag_Bucket'] = pd.cut(df_cash_lag['Lag_Days'], bins=bins, labels=labels)
+lag_daily  = df_cash_lag.groupby(['Post Date','Lag_Bucket'], observed=True).size().reset_index(name='count')
+lag_total  = df_cash_lag.groupby('Post Date').size().reset_index(name='total')
+lag_daily  = lag_daily.merge(lag_total, on='Post Date')
+lag_daily['pct'] = lag_daily['count'] / lag_daily['total']
+lag_pivot  = lag_daily.pivot_table(index='Post Date', columns='Lag_Bucket', values='pct', fill_value=0)
+lag_pivot.columns = [f'lag_{c}' for c in lag_pivot.columns]
+lag_pivot  = lag_pivot.reset_index().rename(columns={'Post Date': 'ds'})
+
+# ── Fill full date range ──────────────────────────────────────────
+date_range = pd.date_range(daily_cash['ds'].min(), daily_cash['ds'].max(), freq='D')
+daily = daily_cash.set_index('ds').reindex(date_range, fill_value=0).reset_index()
+daily.columns = ['ds', 'y']
+
+# ── Merge everything ──────────────────────────────────────────────
+daily = daily.merge(daily_wo_count,    on='ds', how='left')
+daily = daily.merge(payor_pivot,       on='ds', how='left')
+daily = daily.merge(lag_pivot,         on='ds', how='left')
+daily = daily.merge(daily_large_count, on='ds', how='left')
+daily = daily.merge(daily_mega_count,  on='ds', how='left')
+daily = daily.fillna(0)
+
+# ── Date & flag features ──────────────────────────────────────────
+daily['is_friday']     = (daily['ds'].dt.dayofweek == 4).astype(int)
+daily['is_weekend']    = (daily['ds'].dt.dayofweek >= 5).astype(int)
+daily['month']         = daily['ds'].dt.month
+daily['quarter']       = daily['ds'].dt.quarter
+daily['day_of_week']   = daily['ds'].dt.dayofweek
+daily['has_large_pmt'] = (daily['large_pmt_count'] > 0).astype(int)
+daily['has_mega_pmt']  = (daily['mega_pmt_count'] > 0).astype(int)
+
+# ── Business days only + lag features ────────────────────────────
+daily_biz = daily[daily['is_weekend'] == 0].copy().reset_index(drop=True)
+for lag in [1, 2, 3, 5, 10, 21, 63]:
+    daily_biz[f'cash_lag_{lag}'] = daily_biz['y'].shift(lag)
+daily_biz['rolling_5d_mean']  = daily_biz['y'].shift(1).rolling(5).mean()
+daily_biz['rolling_21d_mean'] = daily_biz['y'].shift(1).rolling(21).mean()
+daily_biz['rolling_5d_std']   = daily_biz['y'].shift(1).rolling(5).std()
+daily_biz = daily_biz.dropna().reset_index(drop=True)
+daily_biz['y_log'] = np.log1p(daily_biz['y'])
+
+# ── Train/test split ──────────────────────────────────────────────
+cutoff    = daily_biz['ds'].max() - pd.Timedelta(days=365)
+train_biz = daily_biz[daily_biz['ds'] <= cutoff].copy()
+test_biz  = daily_biz[daily_biz['ds'] >  cutoff].copy()
+
+print(f"\n daily ready:     {daily.shape}")
+print(f" daily_biz ready: {daily_biz.shape}")
+print(f"\nLarge/mega columns confirmed:")
+print([c for c in daily_biz.columns if 'large' in c or 'mega' in c or 'has_' in c])
+print(f"\nTrain: {train_biz['ds'].min().date()} → {train_biz['ds'].max().date()} ({len(train_biz)} days)")
+print(f"Test:  {test_biz['ds'].min().date()} → {test_biz['ds'].max().date()} ({len(test_biz)} days)")
+
+
+# There is a large outlier in the testing data of $5,424,706. Since all payments are legitimate payments and cannot be excluded, used log transform to the data so as to neutralize the outlier. The cell below confirms that log transform reduces the outlier to only 1 STD above the mean -> best case scenario.
+
+# In[72]:
+
+
+# Confirm what log transform does to that outlier
+print(f"Raw value:       ${5_424_706:,.0f}")
+print(f"Log1p value:     {np.log1p(5_424_706):.4f}")
+print(f"Mean log1p:      {train_biz['y_log'].mean():.4f}")
+print(f"Std log1p:       {train_biz['y_log'].std():.4f}")
+print(f"Outlier is {(np.log1p(5_424_706) - train_biz['y_log'].mean()) / train_biz['y_log'].std():.1f} std devs above mean in log space")
+
+
+# Confirmed here the train/test split to make sure enough data is being utilized prior to model creation. 
+
+# In[73]:
+
+
+print(f"Train days: {len(train_biz)} ({len(train_biz)/len(daily_biz)*100:.1f}%)")
+print(f"Test days:  {len(test_biz)} ({len(test_biz)/len(daily_biz)*100:.1f}%)")
+print(f"\nZero days remaining in business day set:")
+print(f"  Train zeros: {(train_biz['y']==0).sum()} ({(train_biz['y']==0).mean()*100:.1f}%)")
+print(f"  Test zeros:  {(test_biz['y']==0).sum()} ({(test_biz['y']==0).mean()*100:.1f}%)")
+print(f"\nTarget stats on train:")
+print(f"  Mean:   ${train_biz['y'].mean():,.0f}")
+print(f"  Median: ${train_biz['y'].median():,.0f}")
+print(f"  Max:    ${train_biz['y'].max():,.0f}")
+
+
+# In[74]:
+
+
+import pandas as pd
+from pandas.tseries.holiday import USFederalHolidayCalendar
+
+# ── US Federal Holidays ───────────────────────────────────────────
+cal       = USFederalHolidayCalendar()
+holidays  = cal.holidays(start=daily_biz['ds'].min(), end=daily_biz['ds'].max())
+daily_biz['is_holiday'] = daily_biz['ds'].isin(holidays).astype(int)
+
+# ── Days around holidays (day before and after) ───────────────────
+holiday_dates = pd.DatetimeIndex(holidays)
+day_before    = holiday_dates - pd.Timedelta(days=1)
+day_after     = holiday_dates + pd.Timedelta(days=1)
+daily_biz['is_pre_holiday']  = daily_biz['ds'].isin(day_before).astype(int)
+daily_biz['is_post_holiday'] = daily_biz['ds'].isin(day_after).astype(int)
+
+# ── Fiscal year/quarter features ──────────────────────────────────
+# Fiscal year starts April 1
+def get_fiscal_year(date):
+    if date.month >= 4:
+        return date.year
+    else:
+        return date.year - 1
+
+def get_fiscal_quarter(date):
+    month = date.month
+    if month in [4, 5, 6]:    return 1
+    elif month in [7, 8, 9]:  return 2
+    elif month in [10, 11, 12]: return 3
+    else:                      return 4  # Jan, Feb, Mar
+
+daily_biz['fiscal_year']    = daily_biz['ds'].apply(get_fiscal_year)
+daily_biz['fiscal_quarter'] = daily_biz['ds'].apply(get_fiscal_quarter)
+
+# ── Fiscal quarter end flag (last 5 business days of each quarter) ─
+fiscal_quarter_ends = [
+    '2019-06-28', '2019-09-30', '2019-12-31', '2020-03-31',
+    '2020-06-30', '2020-09-30', '2020-12-31', '2021-03-31',
+    '2021-06-30', '2021-09-30', '2021-12-31', '2022-03-31',
+    '2022-06-30', '2022-09-30', '2022-12-31', '2023-03-31',
+    '2023-06-30', '2023-09-30', '2023-12-31', '2024-03-29',
+    '2024-06-28', '2024-09-30', '2024-12-31', '2025-03-31',
+    '2025-06-30', '2025-09-30', '2025-12-31', '2026-03-31'
+]
+fiscal_quarter_ends = pd.to_datetime(fiscal_quarter_ends)
+
+# Flag last 5 business days before each quarter end
+daily_biz['is_fiscal_qtr_end'] = 0
+for qtr_end in fiscal_quarter_ends:
+    last_5 = pd.bdate_range(end=qtr_end, periods=5)
+    daily_biz.loc[daily_biz['ds'].isin(last_5), 'is_fiscal_qtr_end'] = 1
+
+# ── Fiscal year end flag (last 10 business days of March) ─────────
+fiscal_year_ends = pd.to_datetime([
+    '2020-03-31', '2021-03-31', '2022-03-31', '2023-03-31',
+    '2024-03-29', '2025-03-31', '2026-03-31'
+])
+daily_biz['is_fiscal_yr_end'] = 0
+for yr_end in fiscal_year_ends:
+    last_10 = pd.bdate_range(end=yr_end, periods=10)
+    daily_biz.loc[daily_biz['ds'].isin(last_10), 'is_fiscal_yr_end'] = 1
+
+# ── COVID period flag ─────────────────────────────────────────────
+# March 2020 through December 2021 — peak disruption period
+daily_biz['is_covid'] = (
+    (daily_biz['ds'] >= '2020-03-01') &
+    (daily_biz['ds'] <= '2021-12-31')
+).astype(int)
+
+# ── COVID recovery flag ───────────────────────────────────────────
+# January 2022 through December 2022 — recovery/backlog period
+daily_biz['is_covid_recovery'] = (
+    (daily_biz['ds'] >= '2022-01-01') &
+    (daily_biz['ds'] <= '2022-12-31')
+).astype(int)
+
+# ── Verify ────────────────────────────────────────────────────────
+print("Holiday & period flags added:")
+print(f"   Holiday days:           {daily_biz['is_holiday'].sum()}")
+print(f"   Pre-holiday days:       {daily_biz['is_pre_holiday'].sum()}")
+print(f"   Post-holiday days:      {daily_biz['is_post_holiday'].sum()}")
+print(f"   Fiscal qtr end days:    {daily_biz['is_fiscal_qtr_end'].sum()}")
+print(f"   Fiscal year end days:   {daily_biz['is_fiscal_yr_end'].sum()}")
+print(f"   COVID period days:      {daily_biz['is_covid'].sum()}")
+print(f"   COVID recovery days:    {daily_biz['is_covid_recovery'].sum()}")
+
+# ── Add new flags to feature list ────────────────────────────────
+new_flag_cols = [
+    'is_holiday', 'is_pre_holiday', 'is_post_holiday',
+    'is_fiscal_qtr_end', 'is_fiscal_yr_end',
+    'is_covid', 'is_covid_recovery', 'fiscal_quarter'
+]
+
+# Force float
+daily_biz[new_flag_cols] = daily_biz[new_flag_cols].astype(float)
+
+print(f"\nNew feature columns added: {new_flag_cols}")
+print(f"   daily_biz shape: {daily_biz.shape}")
+
+
+# In[75]:
+
+
+regressor_cols   = [c for c in daily_biz.columns if c.startswith((
+                    'payor_', 'lag_', 'writeoff', 'is_friday', 'month',
+                    'quarter', 'day_of_week', 'has_large', 'has_mega',
+                    'large_pmt', 'mega_pmt', 'rolling_',
+                    'is_holiday', 'is_pre_holiday', 'is_post_holiday',
+                    'is_fiscal', 'is_covid', 'fiscal_quarter'))]
+lag_feature_cols = regressor_cols + [f'cash_lag_{l}' for l in [1, 2, 3, 5, 10, 21, 63]]
+
+print(f"Total features: {len(lag_feature_cols)}")
+print(f"New flags included:")
+print([c for c in lag_feature_cols if 'holiday' in c or 'covid' in c or 'fiscal' in c])
+
+
+# #### *Light GBM Model*
+
+# In[76]:
+
+
+import lightgbm as lgb
+from lightgbm import LGBMRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# ── Train/test split ──────────────────────────────────────────────
+cutoff    = daily_biz['ds'].max() - pd.Timedelta(days=365)  # ← fixed
+train_biz = daily_biz[daily_biz['ds'] <= cutoff].copy()
+test_biz  = daily_biz[daily_biz['ds'] >  cutoff].copy()
+
+daily_biz[lag_feature_cols] = daily_biz[lag_feature_cols].astype(float)
+
+X_train       = train_biz[lag_feature_cols].values
+y_train       = train_biz['y_log'].values
+X_test        = test_biz[lag_feature_cols].values
+y_test_log    = test_biz['y_log'].values
+y_test_actual = test_biz['y'].values
+
+# ── Carve validation from train only ─────────────────────────────
+val_size = 60
+X_val    = X_train[-val_size:]
+y_val    = y_train[-val_size:]
+X_tr     = X_train[:-val_size]
+y_tr     = y_train[:-val_size]
+
+print(f"Train: {train_biz['ds'].min().date()} → {train_biz['ds'].max().date()} ({len(train_biz)} days)")
+print(f"Test:  {test_biz['ds'].min().date()} → {test_biz['ds'].max().date()} ({len(test_biz)} days)")
+print(f"Val carved from train: last {val_size} days")
+print(f"Features: {len(lag_feature_cols)}")
+
+# ── Train ─────────────────────────────────────────────────────────
+lgb_final = LGBMRegressor(
+    n_estimators      = 1000,
+    learning_rate     = 0.03,
+    max_depth         = 4,
+    subsample         = 0.8,
+    colsample_bytree  = 0.7,
+    min_child_samples = 5,
+    reg_alpha         = 0.1,
+    reg_lambda        = 1.0,
+    random_state      = 42,
+    verbose           = -1
+)
+lgb_final.fit(
+    X_tr, y_tr,
+    eval_set  = [(X_val, y_val)],        # ← validation only, test never seen
+    callbacks = [lgb.early_stopping(50, verbose=False),
+                 lgb.log_evaluation(period=-1)]
+)
+
+print(f"\nBest iteration: {lgb_final.best_iteration_}")
+
+# ── Predict & inverse transform ───────────────────────────────────
+y_pred_log_lgb    = lgb_final.predict(X_test)
+y_pred_actual_lgb = np.expm1(y_pred_log_lgb).clip(min=0)
+
+# ── Evaluate ──────────────────────────────────────────────────────
+mask      = y_test_actual > 0
+mae_lgb   = mean_absolute_error(y_test_actual[mask], y_pred_actual_lgb[mask])
+rmse_lgb  = np.sqrt(mean_squared_error(y_test_actual[mask], y_pred_actual_lgb[mask]))
+mape_lgb  = np.mean(np.abs((y_test_actual[mask] - y_pred_actual_lgb[mask]) / y_test_actual[mask])) * 100
+mdape_lgb = np.median(np.abs((y_test_actual[mask] - y_pred_actual_lgb[mask]) / y_test_actual[mask])) * 100
+
+print(f"\nLightGBM Final:")
+print(f"   MAE:   ${mae_lgb:,.2f}")
+print(f"   RMSE:  ${rmse_lgb:,.2f}")
+print(f"   MAPE:  {mape_lgb:.1f}%")
+print(f"   MdAPE: {mdape_lgb:.1f}%")
+
+
+
+# #### *Random Forest*
+
+# In[77]:
+
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# ── Train/test split ──────────────────────────────────────────────
+cutoff    = daily_biz['ds'].max() - pd.Timedelta(days=365)  # ← fixed
+train_biz = daily_biz[daily_biz['ds'] <= cutoff].copy()
+test_biz  = daily_biz[daily_biz['ds'] >  cutoff].copy()
+
+daily_biz[lag_feature_cols] = daily_biz[lag_feature_cols].astype(float)
+
+X_train       = train_biz[lag_feature_cols].values
+y_train       = train_biz['y_log'].values
+X_test        = test_biz[lag_feature_cols].values
+y_test_actual = test_biz['y'].values
+
+# Note: RandomForest does not use eval_set or early stopping —
+# no validation carve needed, no leakage risk
+rf_final = RandomForestRegressor(
+    n_estimators     = 500,
+    max_depth        = 6,
+    min_samples_leaf = 3,
+    random_state     = 42,
+    n_jobs           = -1
+)
+rf_final.fit(X_train, y_train)
+
+# ── Predict & inverse transform ───────────────────────────────────
+y_pred_rf_actual = np.expm1(rf_final.predict(X_test)).clip(min=0)
+
+# ── Evaluate ──────────────────────────────────────────────────────
+mask      = y_test_actual > 0
+mae_rf    = mean_absolute_error(y_test_actual[mask], y_pred_rf_actual[mask])
+rmse_rf   = np.sqrt(mean_squared_error(y_test_actual[mask], y_pred_rf_actual[mask]))
+mape_rf   = np.mean(np.abs((y_test_actual[mask] - y_pred_rf_actual[mask]) / y_test_actual[mask])) * 100
+mdape_rf  = np.median(np.abs((y_test_actual[mask] - y_pred_rf_actual[mask]) / y_test_actual[mask])) * 100
+
+print(f"\nRandom Forest Final:")
+print(f"   MAE:   ${mae_rf:,.2f}")
+print(f"   RMSE:  ${rmse_rf:,.2f}")
+print(f"   MAPE:  {mape_rf:.1f}%")
+print(f"   MdAPE: {mdape_rf:.1f}%")
+
+
+# ### *XGBoost*
+
+# In[78]:
+
+
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# ── Log transform target ──────────────────────────────────────────
+daily_biz['y_log'] = np.log1p(daily_biz['y'])
+daily_biz[lag_feature_cols] = daily_biz[lag_feature_cols].astype(float)
+
+# ── Train/test split ──────────────────────────────────────────────
+cutoff    = daily_biz['ds'].max() - pd.Timedelta(days=365)  # ← fixed
+train_biz = daily_biz[daily_biz['ds'] <= cutoff].copy()
+test_biz  = daily_biz[daily_biz['ds'] >  cutoff].copy()
+
+X_train       = train_biz[lag_feature_cols].values
+y_train       = train_biz['y_log'].values
+X_test        = test_biz[lag_feature_cols].values
+y_test_log    = test_biz['y_log'].values
+y_test_actual = test_biz['y'].values
+
+# ── Carve validation from train only ─────────────────────────────
+val_size = 60
+X_val    = X_train[-val_size:]
+y_val    = y_train[-val_size:]
+X_tr     = X_train[:-val_size]
+y_tr     = y_train[:-val_size]
+
+print(f"Train: {train_biz['ds'].min().date()} → {train_biz['ds'].max().date()} ({len(train_biz)} days)")
+print(f"Test:  {test_biz['ds'].min().date()} → {test_biz['ds'].max().date()} ({len(test_biz)} days)")
+print(f"Val carved from train: last {val_size} days")
+print(f"Features: {len(lag_feature_cols)}")
+
+# ── Train ─────────────────────────────────────────────────────────
+xgb_final = XGBRegressor(
+    n_estimators          = 1000,
+    learning_rate         = 0.03,
+    max_depth             = 4,
+    subsample             = 0.8,
+    colsample_bytree      = 0.7,
+    min_child_weight      = 3,
+    reg_alpha             = 0.1,
+    reg_lambda            = 1.0,
+    random_state          = 42,
+    verbosity             = 0,
+    tree_method           = 'hist',
+    early_stopping_rounds = 50
+)
+xgb_final.fit(
+    X_tr, y_tr,
+    eval_set = [(X_val, y_val)],         # ← validation only, test never seen
+    verbose  = False
+)
+
+print(f"\nBest iteration: {xgb_final.best_iteration}")
+
+# ── Predict & inverse transform ───────────────────────────────────
+y_pred_log_xgb    = xgb_final.predict(X_test)
+y_pred_actual_xgb = np.expm1(y_pred_log_xgb).clip(min=0)
+
+# ── Evaluate ──────────────────────────────────────────────────────
+mask      = y_test_actual > 0
+mae_xgb   = mean_absolute_error(y_test_actual[mask], y_pred_actual_xgb[mask])
+rmse_xgb  = np.sqrt(mean_squared_error(y_test_actual[mask], y_pred_actual_xgb[mask]))
+mape_xgb  = np.mean(np.abs((y_test_actual[mask] - y_pred_actual_xgb[mask]) / y_test_actual[mask])) * 100
+mdape_xgb = np.median(np.abs((y_test_actual[mask] - y_pred_actual_xgb[mask]) / y_test_actual[mask])) * 100
+
+print(f"\nXGBoost Final:")
+print(f"   MAE:   ${mae_xgb:,.2f}")
+print(f"   RMSE:  ${rmse_xgb:,.2f}")
+print(f"   MAPE:  {mape_xgb:.1f}%")
+print(f"   MdAPE: {mdape_xgb:.1f}%")
+
+
+# In[79]:
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
+# ── Data ──────────────────────────────────────────────────────────
+models     = ['LightGBM', 'Random Forest', 'XGBoost']
+mae_vals   = [mae_lgb,    mae_rf,          mae_xgb]
+mdape_vals = [mdape_lgb,  mdape_rf,        mdape_xgb]
+mape_vals  = [mape_lgb,   mape_rf,         mape_xgb]
+
+avg_daily  = test_biz['y'][test_biz['y'] > 0].mean()
+winner_idx = mae_vals.index(min(mae_vals))
+
+# ── 1. Styled DataFrame ───────────────────────────────────────────
+summary_df = pd.DataFrame({
+    'Model':        models,
+    'MAE':          [f"${v:,.0f}" for v in mae_vals],
+    'MdAPE':        [f"{v:.1f}%"  for v in mdape_vals],
+    'MAPE':         [f"{v:.1f}%"  for v in mape_vals],
+    'MAE % of Avg': [f"{v/avg_daily*100:.1f}%" for v in mae_vals],
+    'Winner':       ['* BEST' if i == winner_idx else '' for i in range(len(models))]
+})
+
+from IPython.display import display
+display(summary_df.style
+    .set_caption(
+        f"Model Comparison  |  Avg Daily Cash: ${avg_daily:,.0f}  |  "
+        f"Test: {test_biz['ds'].min().date()} to {test_biz['ds'].max().date()}  |  "
+        f"Non-zero days: {(test_biz['y']>0).sum()} of {len(test_biz)}"
+    )
+    .set_properties(**{'text-align': 'center', 'border': '1px solid lightgrey'})
+    .set_properties(subset=['Model'], **{'text-align': 'left', 'font-weight': 'bold'})
+    .apply(lambda x: [
+        'background-color: #d4edda; font-weight: bold' if i == winner_idx else ''
+        for i in range(len(x))
+    ], axis=0)
+    .hide(axis='index')
+    .set_table_styles([
+        {'selector': 'caption', 'props': [
+            ('font-size', '13px'), ('font-weight', 'bold'),
+            ('padding', '10px'), ('color', '#333')
+        ]},
+        {'selector': 'th', 'props': [
+            ('background-color', '#4a4a4a'), ('color', 'white'),
+            ('font-weight', 'bold'), ('text-align', 'center'),
+            ('padding', '8px')
+        ]},
+        {'selector': 'td', 'props': [('padding', '8px')]},
+    ])
+)
+
+# ── 2. Visual chart ───────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+colors = ['mediumseagreen', 'steelblue', 'coral']
+
+# MAE bar chart
+bars = axes[0].bar(models, mae_vals, color=colors, edgecolor='white', linewidth=1.2)
+bars[winner_idx].set_edgecolor('gold')
+bars[winner_idx].set_linewidth(3)
+for bar, val in zip(bars, mae_vals):
+    axes[0].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(mae_vals)*0.01,
+                 f"${val:,.0f}", ha='center', va='bottom',
+                 fontsize=9, fontweight='bold')
+axes[0].axhline(avg_daily, color='red', linestyle='--', linewidth=1.2,
+                label=f'Avg Daily Cash\n${avg_daily:,.0f}')
+axes[0].set_title('MAE by Model', fontweight='bold', fontsize=12)
+axes[0].set_ylabel('Mean Absolute Error ($)')
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[0].legend(fontsize=8)
+axes[0].tick_params(axis='x', rotation=15)
+
+# MdAPE bar chart
+bars2 = axes[1].bar(models, mdape_vals, color=colors, edgecolor='white', linewidth=1.2)
+bars2[winner_idx].set_edgecolor('gold')
+bars2[winner_idx].set_linewidth(3)
+for bar, val in zip(bars2, mdape_vals):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(mdape_vals)*0.01,
+                 f"{val:.1f}%", ha='center', va='bottom',
+                 fontsize=9, fontweight='bold')
+axes[1].set_title('MdAPE by Model', fontweight='bold', fontsize=12)
+axes[1].set_ylabel('Median Absolute % Error')
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.0f}%'))
+axes[1].tick_params(axis='x', rotation=15)
+
+# MAE as % of average daily cash
+mae_pct = [v/avg_daily*100 for v in mae_vals]
+bars3 = axes[2].bar(models, mae_pct, color=colors, edgecolor='white', linewidth=1.2)
+bars3[winner_idx].set_edgecolor('gold')
+bars3[winner_idx].set_linewidth(3)
+for bar, val in zip(bars3, mae_pct):
+    axes[2].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(mae_pct)*0.01,
+                 f"{val:.1f}%", ha='center', va='bottom',
+                 fontsize=9, fontweight='bold')
+axes[2].axhline(10, color='red', linestyle='--', linewidth=1.2) #, label='10% threshold')
+axes[2].axhline(20, color='orange', linestyle='--', linewidth=1.2) #, label='20% threshold')
+axes[2].set_title('MAE as % of Avg Daily Cash', fontweight='bold', fontsize=12)
+axes[2].set_ylabel('MAE %')
+axes[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.0f}%'))
+axes[2].legend(fontsize=8)
+axes[2].tick_params(axis='x', rotation=15)
+
+winner_patch = mpatches.Patch(edgecolor='gold', facecolor='white',
+                               linewidth=2, label='* Best Model')
+fig.legend(handles=[winner_patch], loc='upper right', fontsize=9)
+plt.suptitle('Cash Forecast Model Comparison', fontsize=14,
+             fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.show()
+
+
+# ##### Future Forecast
+
+# In[80]:
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from IPython.display import display
+
+# ── Configuration ─────────────────────────────────────────────────
+FORECAST_DAYS = 180
+MODEL         = lgb_final
+MODEL_NAME    = 'LightGBM'
+
+# ── Generate future business dates ────────────────────────────────
+last_date    = daily_biz['ds'].max()
+future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=FORECAST_DAYS)
+print(f"Forecasting {FORECAST_DAYS} business days")
+print(f"From: {future_dates[0].date()} --> {future_dates[-1].date()}")
+
+# ── Build future feature dataframe ────────────────────────────────
+future = pd.DataFrame({'ds': future_dates})
+
+# Date features
+future['is_friday']    = (future['ds'].dt.dayofweek == 4).astype(int)
+future['is_weekend']   = 0
+future['month']        = future['ds'].dt.month
+future['quarter']      = future['ds'].dt.quarter
+future['day_of_week']  = future['ds'].dt.dayofweek
+
+# Payor mix — trailing 90 day average from most recent data
+recent    = daily_biz.tail(90)
+payor_cols = [c for c in daily_biz.columns if c.startswith('payor_')]
+for col in payor_cols:
+    future[col] = recent[col].mean()
+
+# Lag bucket mix — trailing 90 day average
+lag_cols = [c for c in daily_biz.columns if c.startswith('lag_')]
+for col in lag_cols:
+    future[col] = recent[col].mean()
+
+# Write-off count — trailing 90 day average
+future['writeoff_count'] = recent['writeoff_count'].mean()
+
+# Large/mega payment flags — conservative, assume no large payments
+future['has_large_pmt']   = 0
+future['has_mega_pmt']    = 0
+future['large_pmt_count'] = 0
+future['mega_pmt_count']  = 0
+
+# Rolling features — filled iteratively below
+future['rolling_5d_mean']  = 0.0
+future['rolling_21d_mean'] = 0.0
+future['rolling_5d_std']   = 0.0
+
+# Cash lag features — filled iteratively below
+for lag in [1, 2, 3, 5, 10, 21, 63]:
+    future[f'cash_lag_{lag}'] = 0.0
+
+# Holiday flags
+cal          = USFederalHolidayCalendar()
+holidays     = cal.holidays(start=future_dates[0], end=future_dates[-1])
+holiday_dates = pd.DatetimeIndex(holidays)
+day_before   = holiday_dates - pd.Timedelta(days=1)
+day_after    = holiday_dates + pd.Timedelta(days=1)
+
+future['is_holiday']      = future['ds'].isin(holidays).astype(int)
+future['is_pre_holiday']  = future['ds'].isin(day_before).astype(int)
+future['is_post_holiday'] = future['ds'].isin(day_after).astype(int)
+
+# Fiscal flags
+future['fiscal_quarter'] = future['ds'].apply(get_fiscal_quarter)
+future['is_fiscal_qtr_end'] = 0
+for qtr_end in fiscal_quarter_ends:
+    last_5 = pd.bdate_range(end=qtr_end, periods=5)
+    future.loc[future['ds'].isin(last_5), 'is_fiscal_qtr_end'] = 1
+
+future['is_fiscal_yr_end'] = 0
+for yr_end in fiscal_year_ends:
+    last_10 = pd.bdate_range(end=yr_end, periods=10)
+    future.loc[future['ds'].isin(last_10), 'is_fiscal_yr_end'] = 1
+
+# COVID flags — post-recovery period
+future['is_covid']          = 0
+future['is_covid_recovery'] = 0
+
+# Force float
+future[lag_feature_cols] = future[lag_feature_cols].astype(float)
+
+# ── Iterative forecast loop ────────────────────────────────────────
+history        = daily_biz[['ds', 'y']].copy()
+predicted_cash = []
+
+for i in future.index:
+    # Build full cash history including prior predictions
+    all_cash = pd.concat([
+        history[['ds', 'y']],
+        pd.DataFrame({
+            'ds': future.loc[future.index < i, 'ds'],
+            'y':  predicted_cash
+        })
+    ]).sort_values('ds').reset_index(drop=True)
+
+    # Fill lag features
+    for lag in [1, 2, 3, 5, 10, 21, 63]:
+        idx = len(all_cash) - lag
+        future.at[i, f'cash_lag_{lag}'] = all_cash['y'].iloc[idx] if idx >= 0 else 0
+
+    # Fill rolling features
+    recent_cash = all_cash['y'].tail(21).values
+    future.at[i, 'rolling_5d_mean']  = np.mean(recent_cash[-5:])  if len(recent_cash) >= 5  else 0
+    future.at[i, 'rolling_21d_mean'] = np.mean(recent_cash[-21:]) if len(recent_cash) >= 21 else 0
+    future.at[i, 'rolling_5d_std']   = np.std(recent_cash[-5:])   if len(recent_cash) >= 5  else 0
+
+    # Predict
+    features  = future.loc[i, lag_feature_cols].values.astype(float).reshape(1, -1)
+    pred_log  = MODEL.predict(features)[0]
+    pred_cash = max(np.expm1(pred_log), 0)
+    predicted_cash.append(pred_cash)
+
+future['forecast'] = predicted_cash
+future['month_period'] = future['ds'].dt.to_period('M')
+first_month = future['month_period'].iloc[0]
+first_month_days = future[future['month_period'] == first_month].shape[0]
+total_biz_days = len(pd.bdate_range(first_month.start_time, first_month.end_time))
+
+if first_month_days < total_biz_days:
+    print(f"Dropping incomplete month: {first_month} ({first_month_days} of {total_biz_days} business days)")
+    future = future[future['month_period'] != first_month].copy()
+print(f"\nForecast complete: {len(future)} business days")
+
+# ── Daily output ──────────────────────────────────────────────────
+future['day_name']     = future['ds'].dt.day_name()
+future['is_friday_flag'] = future['ds'].dt.dayofweek.apply(
+                            lambda x: 'Friday' if x == 4 else '')
+future['holiday_flag'] = future['is_holiday'].apply(
+                            lambda x: 'HOLIDAY' if x == 1 else '')
+
+daily_display = future[['ds', 'day_name', 'forecast',
+                         'is_friday_flag', 'holiday_flag']].copy()
+daily_display['Forecast'] = daily_display['forecast'].apply(lambda x: f"${x:,.0f}")
+daily_display = daily_display.rename(columns={
+    'ds':             'Date',
+    'day_name':       'Day',
+    'is_friday_flag': 'Note',
+    'holiday_flag':   'Holiday'
+}).drop(columns='forecast')
+
+print(f"\n{'='*55}")
+print(f"  DAILY FORECAST — Next {FORECAST_DAYS} Business Days ({MODEL_NAME})")
+print(f"{'='*55}")
+display(daily_display.style
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Date', 'Day'], **{'text-align': 'left'})
+    .apply(lambda x: [
+        'background-color: #fff3cd' if daily_display['Note'].iloc[i] == 'Friday'
+        else 'background-color: #f8d7da' if daily_display['Holiday'].iloc[i] == 'HOLIDAY'
+        else '' for i in range(len(x))
+    ], axis=0)
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]}])
+)
+
+# ── Weekly rollup ─────────────────────────────────────────────────
+future['week'] = future['ds'].dt.to_period('W')
+weekly_future  = future.groupby('week').agg(
+    Forecast       = ('forecast', 'sum'),
+    Days           = ('forecast', 'count'),
+    Friday_Days    = ('is_friday', 'sum'),
+    Holiday_Days   = ('is_holiday', 'sum')
+).reset_index()
+weekly_future['Week']     = weekly_future['week'].astype(str)
+weekly_future['Forecast'] = weekly_future['Forecast'].apply(lambda x: f"${x:,.0f}")
+weekly_future = weekly_future[['Week', 'Forecast', 'Days', 'Friday_Days', 'Holiday_Days']]
+
+print(f"\n{'='*55}")
+print(f"  WEEKLY FORECAST ({MODEL_NAME})")
+print(f"{'='*55}")
+display(weekly_future.style
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Week'], **{'text-align': 'left'})
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]}])
+)
+
+# ── Monthly rollup ────────────────────────────────────────────────
+future['month_period'] = future['ds'].dt.to_period('M')
+monthly_future = future.groupby('month_period').agg(
+    Forecast     = ('forecast', 'sum'),
+    Business_Days = ('forecast', 'count'),
+    Holiday_Days  = ('is_holiday', 'sum'),
+    Friday_Days   = ('is_friday', 'sum')
+).reset_index()
+monthly_future['Month']    = monthly_future['month_period'].astype(str)
+monthly_future['Forecast'] = monthly_future['Forecast'].apply(lambda x: f"${x:,.0f}")
+monthly_future = monthly_future[['Month', 'Forecast', 'Business_Days',
+                                  'Friday_Days', 'Holiday_Days']]
+
+print(f"\n{'='*55}")
+print(f"  MONTHLY FORECAST ({MODEL_NAME})")
+print(f"{'='*55}")
+display(monthly_future.style
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Month'], **{'text-align': 'left'})
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]}])
+)
+
+# ── Visualization ─────────────────────────────────────────────────
+fig, axes = plt.subplots(2, 1, figsize=(16, 10))
+
+# Daily: historical + forecast
+hist_plot = daily_biz.tail(90)[['ds', 'y']]
+axes[0].plot(hist_plot['ds'], hist_plot['y'],
+             label='Historical Actual', color='black', linewidth=1.2)
+axes[0].plot(future['ds'], future['forecast'],
+             label=f'{MODEL_NAME} Forecast', color='mediumseagreen',
+             linewidth=1.5, linestyle='--')
+axes[0].axvline(future['ds'].min(), color='gray', linestyle=':',
+                linewidth=1.5, label='Forecast Start')
+axes[0].set_title(f'{MODEL_NAME} Cash Forecast -- Next {FORECAST_DAYS} Business Days',
+                  fontweight='bold', fontsize=12)
+axes[0].set_ylabel('Cash ($)')
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[0].legend()
+
+# Monthly bar chart
+month_labels = monthly_future['Month'].tolist()
+month_vals   = future.groupby(future['ds'].dt.to_period('M'))['forecast'].sum().values
+bars = axes[1].bar(month_labels, month_vals, color='mediumseagreen', alpha=0.85)
+for bar, val in zip(bars, month_vals):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(month_vals)*0.01,
+                 f"${val:,.0f}", ha='center', va='bottom',
+                 fontsize=9, fontweight='bold')
+axes[1].set_title('Monthly Cash Forecast', fontweight='bold', fontsize=12)
+axes[1].set_ylabel('Forecasted Cash ($)')
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[1].tick_params(axis='x', rotation=15)
+
+plt.tight_layout()
+plt.show()
+
+# ── Grand total ───────────────────────────────────────────────────
+total_forecast = future['forecast'].sum()
+
+summary = pd.DataFrame({
+    'Item': [
+        'Model',
+        'Forecast Days',
+        'Period',
+        'Total Forecast',
+        'Avg Per Day',
+        'Note'
+    ],
+    'Value': [
+        MODEL_NAME,
+        f"{len(future)} business days",
+        f"{future['ds'].min().date()} to {future['ds'].max().date()}",
+        f"${total_forecast:,.0f}",
+        f"${total_forecast/len(future):,.0f}",
+        "Large/mega payments assumed at 0 -- forecast may be conservative on high-volume days"
+    ]
+})
+
+display(summary.style
+    .set_caption(f"Final Forecast Summary -- {MODEL_NAME}")
+    .set_properties(**{'text-align': 'left'})
+    .set_properties(subset=['Item'], **{'font-weight': 'bold', 'width': '150px'})
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'left'), ('padding', '6px')
+    ]},
+    {'selector': 'caption', 'props': [
+        ('font-size', '13px'), ('font-weight', 'bold'),
+        ('padding', '10px'), ('color', '#333'), ('text-align', 'left')
+    ]}])
+)
+
+
+
+# In[81]:
+
+
+fig, axes = plt.subplots(2, 1, figsize=(16, 9))
+
+# ── Full test period ──────────────────────────────────────────────
+axes[0].plot(test_biz['ds'], y_test_actual,     label='Actual',
+             color='black',         linewidth=1.5)
+axes[0].plot(test_biz['ds'], y_pred_actual_lgb, label='LightGBM Forecast',
+             color='mediumseagreen', linewidth=1.5, linestyle='--')
+axes[0].set_title(f'LightGBM Final  |  MAE: ${mae_lgb:,.0f}  |  MdAPE: {mdape_lgb:.1f}%',
+                  fontweight='bold', fontsize=12)
+axes[0].set_ylabel('Cash Received ($)')
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[0].legend()
+
+# ── Scatter: actual vs predicted ──────────────────────────────────
+mask    = y_test_actual > 0
+max_val = max(y_test_actual[mask].max(), y_pred_actual_lgb[mask].max())
+
+axes[1].scatter(y_test_actual[mask], y_pred_actual_lgb[mask],
+                alpha=0.4, color='mediumseagreen', s=20)
+axes[1].plot([0, max_val], [0, max_val],
+             color='red', linestyle='--', linewidth=1.5, label='Perfect Forecast')
+axes[1].set_xlabel('Actual Cash ($)')
+axes[1].set_ylabel('Predicted Cash ($)')
+axes[1].set_title('Actual vs Predicted -- Non-Zero Days',
+                  fontweight='bold', fontsize=12)
+axes[1].legend()
+axes[1].xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+plt.suptitle('LightGBM Final Model -- Test Period Evaluation',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+
+# ##### *Save the Model - No Re-Training*
+
+# In[82]:
+
+
+import joblib
+from azureml.core import Workspace, Datastore
+
+# ── Save LightGBM as primary model ───────────────────────────────
+joblib.dump(lgb_final,        'cash_forecast_model.pkl')
+joblib.dump(lag_feature_cols, 'cash_forecast_features.pkl')
+print("LightGBM saved locally")
+
+# ── Upload to blob ────────────────────────────────────────────────
+ws = Workspace(
+    subscription_id = 'f7068e6f-981e-4f98-88ce-01812f4b007b',
+    resource_group  = 'shepherd_analytics',
+    workspace_name  = 'aml-sa-prod'
+)
+datastore = Datastore.get(ws, 'workspaceblobstore')
+datastore.upload_files(
+    files         = ['cash_forecast_model.pkl', 'cash_forecast_features.pkl'],
+    target_path   = 'Cash_Forecasting_Model/',
+    overwrite     = True,
+    show_progress = True
+)
+print("LightGBM final model saved to blob datastore!")
+print("   Cash_Forecasting_Model/cash_forecast_model.pkl")
+print("   Cash_Forecasting_Model/cash_forecast_features.pkl")
+print(f"\n   Model:    LightGBM")
+print(f"   Features: {len(lag_feature_cols)}")
+print(f"   Trained:  {train_biz['ds'].min().date()} to {train_biz['ds'].max().date()}")
+print(f"   MAE:      ${mae_lgb:,.0f}")
+print(f"   MdAPE:    {mdape_lgb:.1f}%")
+
+
+# Prediction for Jan, Feb, March 2026 to compare to ACTUAL results
+
+# In[85]:
+
+
+# ── Filter test results to Jan - Mar 2026 ────────────────────────
+results_full = pd.DataFrame({
+    'ds':       test_biz['ds'].values,
+    'actual':   y_test_actual,
+    'forecast': y_pred_actual_lgb,
+    'error':    y_test_actual - y_pred_actual_lgb,
+})
+
+# Filter to Jan 1 - Mar 23 2026
+results_q1 = results_full[
+    (results_full['ds'] >= '2026-01-01') &
+    (results_full['ds'] <= '2026-03-31')
+].copy()
+
+results_q1['pct_error'] = (
+    (results_q1['error'] / results_q1['actual'].replace(0, np.nan)) * 100
+)
+
+print(f"Days in comparison: {len(results_q1)}")
+print(f"Non-zero days:      {(results_q1['actual'] > 0).sum()}")
+
+# ── Monthly rollup ────────────────────────────────────────────────
+results_q1['month'] = results_q1['ds'].dt.to_period('M')
+monthly_q1 = results_q1.groupby('month').agg(
+    Actual        = ('actual',   'sum'),
+    Forecast      = ('forecast', 'sum'),
+    Business_Days = ('actual',   'count')
+).reset_index()
+monthly_q1['Error']     = monthly_q1['Actual'] - monthly_q1['Forecast']
+monthly_q1['Error_Pct'] = (
+    monthly_q1['Error'] / monthly_q1['Actual'].replace(0, np.nan) * 100
+).round(1)
+monthly_q1['Within_10pct'] = monthly_q1['Error_Pct'].abs() <= 10
+monthly_q1['Within_20pct'] = monthly_q1['Error_Pct'].abs() <= 20
+
+# ── Display ───────────────────────────────────────────────────────
+monthly_display = pd.DataFrame({
+    'Month':        monthly_q1['month'].astype(str),
+    'Actual':       monthly_q1['Actual'].apply(lambda x: f"${x:,.0f}"),
+    'Forecast':     monthly_q1['Forecast'].apply(lambda x: f"${x:,.0f}"),
+    'Error':        monthly_q1['Error'].apply(lambda x: f"${x:,.0f}"),
+    'Error %':      monthly_q1['Error_Pct'].apply(lambda x: f"{x:.1f}%"),
+    'Within 10%':   monthly_q1['Within_10pct'].apply(lambda x: 'YES' if x else 'NO'),
+    'Within 20%':   monthly_q1['Within_20pct'].apply(lambda x: 'YES' if x else 'NO'),
+    'Biz Days':     monthly_q1['Business_Days']
+})
+
+# ── Total row ─────────────────────────────────────────────────────
+total_actual   = monthly_q1['Actual'].sum()
+total_forecast = monthly_q1['Forecast'].sum()
+total_error    = total_actual - total_forecast
+total_pct      = total_error / total_actual * 100
+
+total_row = pd.DataFrame([{
+    'Month':      'TOTAL',
+    'Actual':     f"${total_actual:,.0f}",
+    'Forecast':   f"${total_forecast:,.0f}",
+    'Error':      f"${total_error:,.0f}",
+    'Error %':    f"{total_pct:.1f}%",
+    'Within 10%': 'YES' if abs(total_pct) <= 10 else 'NO',
+    'Within 20%': 'YES' if abs(total_pct) <= 20 else 'NO',
+    'Biz Days':   monthly_q1['Business_Days'].sum()
+}])
+
+monthly_display = pd.concat([monthly_display, total_row], ignore_index=True)
+
+display(monthly_display.style
+    .set_caption("Jan - Mar 2026  |  Actual vs LightGBM Forecast")
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Month'], **{'text-align': 'left', 'font-weight': 'bold'})
+    .apply(lambda x: [
+        'background-color: #4a4a4a; color: white; font-weight: bold'
+        if monthly_display['Month'].iloc[i] == 'TOTAL' else ''
+        for i in range(len(x))
+    ], axis=0)
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]},
+    {'selector': 'caption', 'props': [
+        ('font-size', '13px'), ('font-weight', 'bold'),
+        ('padding', '10px'), ('color', '#333')
+    ]}])
+)
+
+# ── Visualization ─────────────────────────────────────────────────
+fig, axes = plt.subplots(2, 1, figsize=(16, 9))
+
+# Daily line chart
+axes[0].plot(results_q1['ds'], results_q1['actual'],
+             label='Actual', color='black', linewidth=1.5)
+axes[0].plot(results_q1['ds'], results_q1['forecast'],
+             label='LightGBM Forecast', color='mediumseagreen',
+             linewidth=1.5, linestyle='--')
+axes[0].fill_between(results_q1['ds'],
+                     results_q1['actual'],
+                     results_q1['forecast'],
+                     alpha=0.1, color='mediumseagreen', label='Error Band')
+axes[0].set_title('Daily Actual vs Forecast  |  Jan - Mar 2026',
+                  fontweight='bold', fontsize=12)
+axes[0].set_ylabel('Cash Received ($)')
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[0].legend()
+
+# Monthly bar chart
+months     = monthly_q1['month'].astype(str).tolist()
+x          = np.arange(len(months))
+width      = 0.35
+bars_act   = axes[1].bar(x - width/2, monthly_q1['Actual'],   width,
+                          label='Actual',   color='black',         alpha=0.8)
+bars_fore  = axes[1].bar(x + width/2, monthly_q1['Forecast'], width,
+                          label='Forecast', color='mediumseagreen', alpha=0.8)
+for bar, val in zip(bars_act, monthly_q1['Actual']):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(monthly_q1['Actual'])*0.01,
+                 f"${val:,.0f}", ha='center', va='bottom', fontsize=8)
+for bar, val in zip(bars_fore, monthly_q1['Forecast']):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + max(monthly_q1['Actual'])*0.01,
+                 f"${val:,.0f}", ha='center', va='bottom', fontsize=8)
+axes[1].set_title('Monthly Actual vs Forecast  |  Jan - Mar 2026',
+                  fontweight='bold', fontsize=12)
+axes[1].set_ylabel('Cash ($)')
+axes[1].set_xticks(x)
+axes[1].set_xticklabels(months)
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[1].legend()
+
+plt.suptitle('LightGBM Forecast Validation  |  Jan - Mar 2026',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+
+# In[84]:
+
+
+feb_detail = results_q1[
+    (results_q1['ds'] >= '2026-02-01') &
+    (results_q1['ds'] <= '2026-02-28')
+].copy()
+feb_detail['error_abs'] = feb_detail['error'].abs()
+print(feb_detail.sort_values('error', ascending=True).to_string(index=False))
+
+
+# February's miss is explained by three days: Feb 13 - $5.77M vs. $1.81M; Feb 27 - $4.58M vs. $2.79M; Feb 6 - $4.77 vs. $3.53M
+# these three days alone account for almost $7M which is essentially the entire monthly miss of $6.97M. 
+# 
+# Model performs as designed for normal cash flow; however, days with these large payments will always be under-forecast because they are by defintion unpredictable outliers. 
+
+# In[89]:
+
+
+nz_train = train_actual[train_actual['y'] > 0].copy()
+
+# 90th percentile of non-zero days as large day threshold
+large_day_threshold = nz_train['y'].quantile(0.90)
+print(f"Large day threshold (90th pct, non-zero): ${large_day_threshold:,.0f}")
+
+large_days  = nz_train[nz_train['y'] >= large_day_threshold]
+normal_days = nz_train[nz_train['y'] <  large_day_threshold]
+
+print(f"\nLarge payment days:")
+print(f"  Count:    {len(large_days)} ({len(large_days)/len(nz_train)*100:.1f}% of non-zero days)")
+print(f"  Mean:     ${large_days['y'].mean():,.0f}")
+print(f"  Median:   ${large_days['y'].median():,.0f}")
+print(f"  p25:      ${large_days['y'].quantile(0.25):,.0f}")
+print(f"  p75:      ${large_days['y'].quantile(0.75):,.0f}")
+print(f"  Max:      ${large_days['y'].max():,.0f}")
+
+# ── Expected uplift ───────────────────────────────────────────────
+large_day_freq          = len(large_days) / len(nz_train)
+large_day_mean          = large_days['y'].mean()
+large_day_p25           = large_days['y'].quantile(0.25)
+large_day_p75           = large_days['y'].quantile(0.75)
+expected_uplift_per_day = large_day_freq * large_day_mean
+
+print(f"\nFrequency:             {large_day_freq*100:.1f}% of non-zero days")
+print(f"Expected per month:    {large_day_freq*21:.1f} large days")
+print(f"Expected uplift/day:   ${expected_uplift_per_day:,.0f}")
+print(f"Expected uplift/month: ${expected_uplift_per_day*21:,.0f}")
+
+# ── Apply to monthly forecast ─────────────────────────────────────
+future['month_period'] = future['ds'].dt.to_period('M')
+monthly_buf = future.groupby('month_period').agg(
+    Base_Forecast = ('forecast', 'sum'),
+    Business_Days = ('forecast', 'count')
+).reset_index()
+monthly_buf['Month']             = monthly_buf['month_period'].astype(str)
+monthly_buf['Large_Pmt_Buffer']  = monthly_buf['Business_Days'] * expected_uplift_per_day
+monthly_buf['Adj_Forecast']      = monthly_buf['Base_Forecast'] + monthly_buf['Large_Pmt_Buffer']
+monthly_buf['Low']               = monthly_buf['Base_Forecast']
+monthly_buf['High']              = (monthly_buf['Base_Forecast'] + 
+                                    monthly_buf['Business_Days'] * 
+                                    large_day_freq * large_day_p75)
+
+# ── Display ───────────────────────────────────────────────────────
+adj_display = pd.DataFrame({
+    'Month':            monthly_buf['Month'],
+    'Base Forecast':    monthly_buf['Base_Forecast'].apply(lambda x: f"${x:,.0f}"),
+    'Large Pmt Buffer': monthly_buf['Large_Pmt_Buffer'].apply(lambda x: f"${x:,.0f}"),
+    'Adj Forecast':     monthly_buf['Adj_Forecast'].apply(lambda x: f"${x:,.0f}"),
+    'Low':              monthly_buf['Low'].apply(lambda x: f"${x:,.0f}"),
+    'High':             monthly_buf['High'].apply(lambda x: f"${x:,.0f}"),
+    'Biz Days':         monthly_buf['Business_Days']
+})
+
+display(adj_display.style
+    .set_caption("Adjusted Monthly Forecast with Large Payment Buffer")
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Month'], **{'text-align': 'left', 'font-weight': 'bold'})
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]}])
+)
+
+# ── Revalidate against February 2026 ─────────────────────────────
+feb_actual   = 23_585_648
+feb_base     = 16_616_884
+feb_biz_days = 20
+feb_adj      = feb_base + (feb_biz_days * expected_uplift_per_day)
+feb_high     = feb_base + (feb_biz_days * large_day_freq * large_day_p75)
+
+print(f"\n=== February 2026 Revalidation ===")
+print(f"Actual:          ${feb_actual:,.0f}")
+print(f"Base Forecast:   ${feb_base:,.0f}   (miss: ${feb_actual - feb_base:,.0f})")
+print(f"Adj Forecast:    ${feb_adj:,.0f}   (miss: ${feb_actual - feb_adj:,.0f})")
+print(f"High Range:      ${feb_high:,.0f}   (miss: ${feb_actual - feb_high:,.0f})")
+
+
+# In[88]:
+
+
+# ── Diagnose daily cash distribution in train ─────────────────────
+print("=== train_biz daily cash distribution ===")
+print(f"Total rows:     {len(train_actual)}")
+print(f"Zero days:      {(train_actual['y'] == 0).sum()}")
+print(f"Non-zero days:  {(train_actual['y'] > 0).sum()}")
+print(f"\nPercentiles (all days including zeros):")
+for p in [10, 25, 50, 75, 90, 95, 99]:
+    print(f"  {p}th: ${train_actual['y'].quantile(p/100):,.0f}")
+
+print(f"\nPercentiles (non-zero days only):")
+nz = train_actual[train_actual['y'] > 0]
+for p in [10, 25, 50, 75, 90, 95, 99]:
+    print(f"  {p}th: ${nz['y'].quantile(p/100):,.0f}")
+
+print(f"\nTop 10 days by cash:")
+print(train_actual.nlargest(10, 'y')[['ds','y']].to_string(index=False))
+
+
+# In[92]:
+
+
+nz_train = train_actual[train_actual['y'] > 0].copy()
+
+# 90th percentile of non-zero days as large day threshold
+large_day_threshold = nz_train['y'].quantile(0.90)
+print(f"Large day threshold (90th pct, non-zero): ${large_day_threshold:,.0f}")
+
+large_days  = nz_train[nz_train['y'] >= large_day_threshold]
+normal_days = nz_train[nz_train['y'] <  large_day_threshold]
+
+print(f"\nLarge payment days:")
+print(f"  Count:    {len(large_days)} ({len(large_days)/len(nz_train)*100:.1f}% of non-zero days)")
+print(f"  Mean:     ${large_days['y'].mean():,.0f}")
+print(f"  Median:   ${large_days['y'].median():,.0f}")
+print(f"  p25:      ${large_days['y'].quantile(0.25):,.0f}")
+print(f"  p75:      ${large_days['y'].quantile(0.75):,.0f}")
+print(f"  Max:      ${large_days['y'].max():,.0f}")
+
+# ── Expected uplift ───────────────────────────────────────────────
+large_day_freq          = len(large_days) / len(nz_train)
+large_day_mean          = large_days['y'].mean()
+large_day_p25           = large_days['y'].quantile(0.25)
+large_day_p75           = large_days['y'].quantile(0.75)
+expected_uplift_per_day = large_day_freq * large_day_mean
+
+print(f"\nFrequency:             {large_day_freq*100:.1f}% of non-zero days")
+print(f"Expected per month:    {large_day_freq*21:.1f} large days")
+print(f"Expected uplift/day:   ${expected_uplift_per_day:,.0f}")
+print(f"Expected uplift/month: ${expected_uplift_per_day*21:,.0f}")
+
+# ── Apply to monthly forecast ─────────────────────────────────────
+future['month_period'] = future['ds'].dt.to_period('M')
+monthly_buf = future.groupby('month_period').agg(
+    Base_Forecast = ('forecast', 'sum'),
+    Business_Days = ('forecast', 'count')
+).reset_index()
+monthly_buf['Month']             = monthly_buf['month_period'].astype(str)
+monthly_buf['Large_Pmt_Buffer']  = monthly_buf['Business_Days'] * expected_uplift_per_day
+monthly_buf['Adj_Forecast']      = monthly_buf['Base_Forecast'] + monthly_buf['Large_Pmt_Buffer']
+monthly_buf['Low']               = monthly_buf['Base_Forecast']
+monthly_buf['High']              = (monthly_buf['Base_Forecast'] + 
+                                    monthly_buf['Business_Days'] * 
+                                    large_day_freq * large_day_p75)
+
+# ── Display ───────────────────────────────────────────────────────
+adj_display = pd.DataFrame({
+    'Month':            monthly_buf['Month'],
+    'Base Forecast':    monthly_buf['Base_Forecast'].apply(lambda x: f"${x:,.0f}"),
+    'Large Pmt Buffer': monthly_buf['Large_Pmt_Buffer'].apply(lambda x: f"${x:,.0f}"),
+    'Adj Forecast':     monthly_buf['Adj_Forecast'].apply(lambda x: f"${x:,.0f}"),
+    'Low':              monthly_buf['Low'].apply(lambda x: f"${x:,.0f}"),
+    'High':             monthly_buf['High'].apply(lambda x: f"${x:,.0f}"),
+    'Biz Days':         monthly_buf['Business_Days']
+})
+
+display(adj_display.style
+    .set_caption("Adjusted Monthly Forecast with Large Payment Buffer")
+    .set_properties(**{'text-align': 'center'})
+    .set_properties(subset=['Month'], **{'text-align': 'left', 'font-weight': 'bold'})
+    .hide(axis='index')
+    .set_table_styles([{'selector': 'th', 'props': [
+        ('background-color', '#4a4a4a'), ('color', 'white'),
+        ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '6px')
+    ]}])
+)
+
+# ── Revalidate against February 2026 ─────────────────────────────
+feb_actual   = 23_585_648
+feb_base     = 16_616_884
+feb_biz_days = 20
+feb_adj      = feb_base + (feb_biz_days * expected_uplift_per_day)
+feb_high     = feb_base + (feb_biz_days * large_day_freq * large_day_p75)
+
+print(f"\n=== February 2026 Revalidation ===")
+print(f"Actual:          ${feb_actual:,.0f}")
+print(f"Base Forecast:   ${feb_base:,.0f}   (miss: ${feb_actual - feb_base:,.0f})")
+print(f"Adj Forecast:    ${feb_adj:,.0f}   (miss: ${feb_actual - feb_adj:,.0f})")
+print(f"High Range:      ${feb_high:,.0f}   (miss: ${feb_actual - feb_high:,.0f})")
+#Paste the February revalidation output — if the threshold and frequency are now correct the adjusted forecast should get meaningfully closer to the $23.6M actual.can we make a graph of acutal vs. predicted for the past year?5:01 PMpython# ── Filter test results to last 12 months ─────────────────────────
+results_full = pd.DataFrame({
+    'ds':       test_biz['ds'].values,
+    'actual':   y_test_actual,
+    'forecast': y_pred_actual_lgb,
+    'error':    y_test_actual - y_pred_actual_lgb,
+})
+
+results_full['month'] = results_full['ds'].dt.to_period('M')
+
+# ── Monthly rollup ────────────────────────────────────────────────
+monthly_full = results_full.groupby('month').agg(
+    Actual    = ('actual',   'sum'),
+    Forecast  = ('forecast', 'sum'),
+    Biz_Days  = ('actual',   'count')
+).reset_index()
+monthly_full['Error']     = monthly_full['Actual'] - monthly_full['Forecast']
+monthly_full['Error_Pct'] = (monthly_full['Error'] / 
+                              monthly_full['Actual'].replace(0, np.nan) * 100).round(1)
+monthly_full['Month_Str'] = monthly_full['month'].astype(str)
+
+# ── Plot ──────────────────────────────────────────────────────────
+fig, axes = plt.subplots(3, 1, figsize=(16, 14))
+
+# ── Panel 1: Daily actual vs forecast ────────────────────────────
+axes[0].plot(results_full['ds'], results_full['actual'],
+             label='Actual', color='black', linewidth=1.2)
+axes[0].plot(results_full['ds'], results_full['forecast'],
+             label='LightGBM Forecast', color='mediumseagreen',
+             linewidth=1.2, linestyle='--')
+axes[0].fill_between(results_full['ds'],
+                     results_full['actual'],
+                     results_full['forecast'],
+                     alpha=0.15, color='mediumseagreen', label='Error Band')
+axes[0].set_title('Daily Actual vs Forecast  |  Full Test Period',
+                  fontweight='bold', fontsize=12)
+axes[0].set_ylabel('Cash ($)')
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[0].legend(loc='upper left')
+axes[0].tick_params(axis='x', rotation=15)
+
+# ── Panel 2: Monthly grouped bar chart ───────────────────────────
+x     = np.arange(len(monthly_full))
+width = 0.35
+bars_act  = axes[1].bar(x - width/2, monthly_full['Actual'],
+                         width, label='Actual',
+                         color='#333333', alpha=0.85)
+bars_fore = axes[1].bar(x + width/2, monthly_full['Forecast'],
+                         width, label='LightGBM Forecast',
+                         color='mediumseagreen', alpha=0.85)
+
+for bar, val in zip(bars_act, monthly_full['Actual']):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + monthly_full['Actual'].max()*0.01,
+                 f"${val/1e6:.1f}M", ha='center', va='bottom', fontsize=7.5)
+for bar, val in zip(bars_fore, monthly_full['Forecast']):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + monthly_full['Actual'].max()*0.01,
+                 f"${val/1e6:.1f}M", ha='center', va='bottom', fontsize=7.5)
+
+axes[1].set_title('Monthly Actual vs Forecast',
+                  fontweight='bold', fontsize=12)
+axes[1].set_ylabel('Cash ($)')
+axes[1].set_xticks(x)
+axes[1].set_xticklabels(monthly_full['Month_Str'], rotation=15)
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+axes[1].legend()
+
+# ── Panel 3: Monthly error % ──────────────────────────────────────
+colors_err = ['#d9534f' if abs(e) > 20
+              else '#f0ad4e' if abs(e) > 10
+              else '#5cb85c'
+              for e in monthly_full['Error_Pct']]
+
+bars_err = axes[2].bar(monthly_full['Month_Str'],
+                        monthly_full['Error_Pct'],
+                        color=colors_err, alpha=0.85)
+for bar, val in zip(bars_err, monthly_full['Error_Pct']):
+    axes[2].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + (1 if val >= 0 else -2.5),
+                 f"{val:.1f}%", ha='center', va='bottom', fontsize=8)
+
+axes[2].axhline(0,   color='black', linewidth=0.8)
+axes[2].axhline(10,  color='#f0ad4e', linestyle='--',
+                linewidth=1.2, label='10% threshold')
+axes[2].axhline(-10, color='#f0ad4e', linestyle='--', linewidth=1.2)
+axes[2].axhline(20,  color='#d9534f', linestyle='--',
+                linewidth=1.2, label='20% threshold')
+axes[2].axhline(-20, color='#d9534f', linestyle='--', linewidth=1.2)
+axes[2].set_title('Monthly Forecast Error %  |  Green = Within 10%  |  '
+                  'Orange = Within 20%  |  Red = Over 20%',
+                  fontweight='bold', fontsize=12)
+axes[2].set_ylabel('Error %')
+axes[2].set_xticklabels(monthly_full['Month_Str'], rotation=15)
+axes[2].legend(loc='upper right')
+
+plt.suptitle('LightGBM Cash Forecast  |  Full Test Period Evaluation',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# ── Summary stats ─────────────────────────────────────────────────
+months_within_10 = (monthly_full['Error_Pct'].abs() <= 10).sum()
+months_within_20 = (monthly_full['Error_Pct'].abs() <= 20).sum()
+total_months     = len(monthly_full)
+
+print(f"\n=== Full Test Period Summary ===")
+print(f"Months within 10%:  {months_within_10} of {total_months}")
+print(f"Months within 20%:  {months_within_20} of {total_months}")
+print(f"Total Actual:       ${monthly_full['Actual'].sum():,.0f}")
+print(f"Total Forecast:     ${monthly_full['Forecast'].sum():,.0f}")
+print(f"Total Error:        ${monthly_full['Error'].sum():,.0f}")
+print(f"Overall Error %:    {monthly_full['Error'].sum() / monthly_full['Actual'].sum() * 100:.1f}%")
+
+
+# Add in AR aging days into the model!
